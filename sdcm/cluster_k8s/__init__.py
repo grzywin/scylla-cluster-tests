@@ -2566,7 +2566,7 @@ class ScyllaPodCluster(cluster.BaseScyllaCluster, PodCluster):  # pylint: disabl
                 readiness_timeout=timeout, dc_idx=dc_idx)
             self.check_nodes_up_and_normal(nodes=nodes, verification_node=verification_node)
 
-    @timeout_wrapper(timeout=600, sleep_time=3, allowed_exceptions=NETWORK_EXCEPTIONS + (ClusterNodesNotReady,),
+    @timeout_wrapper(timeout=600, sleep_time=30, allowed_exceptions=NETWORK_EXCEPTIONS + (ClusterNodesNotReady,),
                      message="Waiting for nodes to join the cluster kurde")
     def check_nodes_up_and_normal(self, nodes=None, verification_node=None):
         super().check_nodes_up_and_normal(nodes=nodes, verification_node=verification_node)
