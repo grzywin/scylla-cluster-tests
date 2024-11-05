@@ -123,7 +123,7 @@ MINIO_NAMESPACE = "minio"
 SCYLLA_CONFIG_NAME = "scylla-config"
 SCYLLA_AGENT_CONFIG_NAME = "scylla-agent-config"
 
-K8S_LOCAL_VOLUME_PROVISIONER_VERSION = "0.3.0"  # without 'v' prefix
+K8S_LOCAL_VOLUME_PROVISIONER_VERSION = "0.4.0"  # without 'v' prefix
 SCYLLA_MANAGER_AGENT_VERSION_IN_SCYLLA_MANAGER = "3.2.6"
 
 # NOTE: add custom annotations to a ServiceAccount used by a ScyllaCluster
@@ -1061,67 +1061,79 @@ class KubernetesCluster(metaclass=abc.ABCMeta):  # pylint: disable=too-many-publ
     def install_dynamic_local_volume_provisioner(
             self, node_pools: list[CloudK8sNodePool] | CloudK8sNodePool) -> None:
         if self.params.get('reuse_cluster'):
+            self.log.info("Cluster reuse is enabled; skipping dynamic local volume provisioner installation.")
             return
         if not isinstance(node_pools, list):
             node_pools = [node_pools]
 
-        self.log.info("Install dynamic local volume provisioner")
+        self.log.info("Starting installation of dynamic local volume provisioner.")
         config_modifiers = [affinity_modifier
                             for current_pool in node_pools
                             for affinity_modifier in current_pool.affinity_modifiers]
+        self.log.debug(f"Config modifiers: {config_modifiers}")
 
         def image_modifier(obj):
             if obj["kind"] != "DaemonSet":
                 return
             for container_data in obj["spec"]["template"]["spec"]["containers"]:
                 if "scylladb/k8s-local-volume-provisioner" in container_data["image"]:
+                    old_image = container_data["image"]
                     container_data["image"] = (
                         f"{container_data['image'].split(':')[0]}:{K8S_LOCAL_VOLUME_PROVISIONER_VERSION}")
+                    self.log.debug(f"Image modified from {old_image} to {container_data['image']}")
 
         def example_disk_modifier(obj):
             if obj["kind"] != "DaemonSet":
                 return
-            # NOTE: add a bit more storage to cover XFS filesystem overhead.
-            disk_size_kb = int(self.params.get("k8s_scylla_disk_gi") * 1.012 * 1024**2)
+            disk_size_kb = int(self.params.get("k8s_scylla_disk_gi") * 1.012 * 1024 ** 2)
+            self.log.debug(f"Setting disk size to {disk_size_kb} KB.")
             for container_data in obj["spec"]["template"]["spec"]["containers"]:
                 if "disk-setup" not in container_data["name"]:
                     continue
                 for i, cmd in enumerate(container_data["command"]):
                     if 'seek=' not in cmd:
                         continue
-                    # TODO: stop using this modifier when the code in the source repo allows
-                    #       to set custom disk size.
-                    # NOTE: set the disk size that satisfies our configured values for storage
+                    old_cmd = container_data["command"][i]
                     container_data["command"][i] = re.sub(
                         r"seek=\d+", f"seek={disk_size_kb}", container_data["command"][i])
+                    self.log.debug(f"Modified command from '{old_cmd}' to '{container_data['command'][i]}'")
 
         with TemporaryDirectory() as tmp_dir_name:
             repo_dst_dir = os.path.join(tmp_dir_name, 'dynamic-local-volume-provisioner')
+            self.log.info("Downloading k8s-local-volume-provisioner from GitHub.")
 
             download_from_github(
                 repo='scylladb/k8s-local-volume-provisioner',
                 tag=f'tags/v{K8S_LOCAL_VOLUME_PROVISIONER_VERSION}',
                 dst_dir=repo_dst_dir)
 
+            self.log.info("Applying storage class configuration for XFS.")
             self.apply_file(sct_abs_path(f"{repo_dst_dir}/example/storageclass_xfs.yaml"))
 
-            # NOTE: apply example disk setup formatted to the XFS only on local K8S setups
             if "k8s-local" in self.params.get("cluster_backend"):
                 path_to_disk_setup_config = sct_abs_path(f"{repo_dst_dir}/example/disk-setup")
+                self.log.info(f"Applying disk setup configuration: {path_to_disk_setup_config}")
                 self.apply_file(
                     path_to_disk_setup_config,
                     modifiers=config_modifiers + [example_disk_modifier] + [image_modifier],
                     envsubst=False)
+
+                self.log.info("Waiting for XFS disk setup DaemonSet to be ready.")
                 self.kubectl("rollout status daemonset.apps/xfs-disk-setup",
                              namespace="xfs-disk-setup")
 
             path_to_csi_driver_config = sct_abs_path(f"{repo_dst_dir}/deploy/kubernetes")
+            self.log.info(f"Applying CSI driver configuration: {path_to_csi_driver_config}")
             self.apply_file(
                 path_to_csi_driver_config,
                 modifiers=config_modifiers + [image_modifier],
                 envsubst=False)
+
+            self.log.info("Waiting for local CSI driver DaemonSet to be ready.")
             self.kubectl("rollout status daemonset.apps/local-csi-driver",
                          namespace="local-csi-driver")
+
+        self.log.info("Dynamic local volume provisioner installation completed.")
 
     @log_run_info
     def prepare_k8s_scylla_nodes(
