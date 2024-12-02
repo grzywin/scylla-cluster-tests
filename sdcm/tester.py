@@ -1097,7 +1097,7 @@ class ClusterTester(db_stats.TestStatsMixin, unittest.TestCase):  # pylint: disa
         if db_cluster.nodes[0].raft.is_consistent_topology_changes_enabled:
             self.log.debug("Skipping change rf of system_auth because with consistent topology auth-v2 is enabled")
             return
-        self.set_ks_strategy_to_network_and_rf_according_to_cluster(keyspace="system_auth", db_cluster=db_cluster)
+        # self.set_ks_strategy_to_network_and_rf_according_to_cluster(keyspace="system_auth", db_cluster=db_cluster)
 
     def set_ks_strategy_to_network_and_rf_according_to_cluster(self, keyspace, db_cluster=None, repair_after_alter=True):
         db_cluster = db_cluster or self.db_cluster
