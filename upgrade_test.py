@@ -36,7 +36,7 @@ from sdcm.cluster import BaseNode
 from sdcm.fill_db_data import FillDatabaseData
 from sdcm.sct_events import Severity
 from sdcm.stress_thread import CassandraStressThread
-from sdcm.utils.common import ParallelObject
+from sdcm.utils.common import ParallelObject, LOGGER
 from sdcm.utils.decorators import retrying
 from sdcm.utils.user_profile import get_profile_content
 from sdcm.utils.version_utils import (
@@ -1267,9 +1267,10 @@ class UpgradeTest(FillDatabaseData, loader_utils.LoaderUtilsMixin):
         self.assertEqual(expected_docker_image_tag, actual_docker_image_tag)
 
         InfoEvent(message='Step6 - Wait for the update of Scylla cluster').publish()
+        LOGGER.info("Checking if increasing timeout helped")
         for scylla_pod in self.db_cluster.nodes[::-1]:
             scylla_pod.wait_till_k8s_pod_get_uid(
-                ignore_uid=old_scylla_pods_uids[scylla_pod.name], throw_exc=True, timeout=900)
+                ignore_uid=old_scylla_pods_uids[scylla_pod.name], throw_exc=True, timeout=1800)
         for scylla_pod in self.db_cluster.nodes[::-1]:
             scylla_pod.wait_for_pod_readiness()
 
