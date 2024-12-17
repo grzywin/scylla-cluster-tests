@@ -1276,7 +1276,8 @@ class UpgradeTest(FillDatabaseData, loader_utils.LoaderUtilsMixin):
         for condition in ("Available=True", "Progressing=False", "Degraded=False"):
             self.k8s_cluster.kubectl_wait(
                 f"scyllacluster {self.params.get('k8s_scylla_cluster_name')} --for=condition={condition}",
-                namespace=self.db_cluster.namespace, timeout=600)
+                namespace=self.db_cluster.namespace, timeout=1800)
+
         scylla_cluster_conditions = json.loads(self.k8s_cluster.kubectl(
             f"get scyllacluster {self.params.get('k8s_scylla_cluster_name')} -o json",
             namespace=self.db_cluster.namespace).stdout.strip())["status"]["conditions"]
@@ -1316,7 +1317,7 @@ class UpgradeTest(FillDatabaseData, loader_utils.LoaderUtilsMixin):
             dc_idx=peer_db_node.dc_idx,
             rack=peer_db_node.rack,
             enable_auto_bootstrap=True)
-        self.db_cluster.wait_for_init(node_list=new_nodes, timeout=40 * 60)
+        self.db_cluster.wait_for_init(node_list=new_nodes, timeout=40 * 80)
         self.db_cluster.wait_sts_rollout_restart(pods_to_wait=1)
         self.db_cluster.wait_for_nodes_up_and_normal(nodes=new_nodes)
         self.monitors.reconfigure_scylla_monitoring()

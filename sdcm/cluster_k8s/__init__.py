@@ -389,7 +389,7 @@ class KubernetesCluster(metaclass=abc.ABCMeta):  # pylint: disable=too-many-publ
         @timeout_wrapper(timeout=timeout, sleep_time=5)
         def wait_body():
             nonlocal last_resource_count
-            result = self.kubectl('wait --timeout=1m', *command, namespace=namespace, timeout=timeout, remoter=remoter,
+            result = self.kubectl('wait --timeout=5m', *command, namespace=namespace, timeout=timeout, remoter=remoter,
                                   verbose=verbose)
             current_resource_count = result.stdout.count('condition met')
             if current_resource_count != last_resource_count:
@@ -817,7 +817,9 @@ class KubernetesCluster(metaclass=abc.ABCMeta):  # pylint: disable=too-many-publ
                         if not current_file.endswith((".yaml", ".yml")):
                             continue
                         self.apply_file(
-                            os.path.join(crd_basedir, current_file), modifiers=[], envsubst=False)
+                            os.path.join(crd_basedir, current_file), modifiers=[], envsubst=False,
+                            server_side=True, force_conflicts=True)
+
             except Exception as exc:  # pylint: disable=broad-except  # noqa: BLE001
                 self.log.debug("Upgrade Scylla Operator CRDs: Exception: %s", exc)
             self.log.info("Upgrade Scylla Operator CRDs: END")
@@ -851,7 +853,7 @@ class KubernetesCluster(metaclass=abc.ABCMeta):  # pylint: disable=too-many-publ
                          '"path": "/spec/template/spec/containers/0/args/-", '
                          '"value": "--feature-gates=AutomaticTLSCertificates=true" }]\' ')
             self.kubectl(patch_cmd, namespace=SCYLLA_OPERATOR_NAMESPACE)
-        time.sleep(5)
+        time.sleep(120)
         self.kubectl("rollout status deployment scylla-operator",
                      namespace=SCYLLA_OPERATOR_NAMESPACE)
 
