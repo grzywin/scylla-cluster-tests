@@ -123,8 +123,8 @@ MINIO_NAMESPACE = "minio"
 SCYLLA_CONFIG_NAME = "scylla-config"
 SCYLLA_AGENT_CONFIG_NAME = "scylla-agent-config"
 
-K8S_LOCAL_VOLUME_PROVISIONER_VERSION = "0.3.0"  # without 'v' prefix
-SCYLLA_MANAGER_AGENT_VERSION_IN_SCYLLA_MANAGER = "3.2.6"
+K8S_LOCAL_VOLUME_PROVISIONER_VERSION = "0.4.0"  # without 'v' prefix
+SCYLLA_MANAGER_AGENT_VERSION_IN_SCYLLA_MANAGER = "3.4.0"
 
 # NOTE: add custom annotations to a ServiceAccount used by a ScyllaCluster
 #       It is needed to make sure that annotations survive operator upgrades
