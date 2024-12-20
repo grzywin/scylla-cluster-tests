@@ -817,7 +817,8 @@ class KubernetesCluster(metaclass=abc.ABCMeta):  # pylint: disable=too-many-publ
                         if not current_file.endswith((".yaml", ".yml")):
                             continue
                         self.apply_file(
-                            os.path.join(crd_basedir, current_file), modifiers=[], envsubst=False)
+                            os.path.join(crd_basedir, current_file), modifiers=[], envsubst=False, server_side=True,
+                            force_conflicts=True)
             except Exception as exc:  # pylint: disable=broad-except  # noqa: BLE001
                 self.log.debug("Upgrade Scylla Operator CRDs: Exception: %s", exc)
             self.log.info("Upgrade Scylla Operator CRDs: END")

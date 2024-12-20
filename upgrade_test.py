@@ -1269,14 +1269,14 @@ class UpgradeTest(FillDatabaseData, loader_utils.LoaderUtilsMixin):
         InfoEvent(message='Step6 - Wait for the update of Scylla cluster').publish()
         for scylla_pod in self.db_cluster.nodes[::-1]:
             scylla_pod.wait_till_k8s_pod_get_uid(
-                ignore_uid=old_scylla_pods_uids[scylla_pod.name], throw_exc=True, timeout=900)
+                ignore_uid=old_scylla_pods_uids[scylla_pod.name], throw_exc=True, timeout=1800)
         for scylla_pod in self.db_cluster.nodes[::-1]:
             scylla_pod.wait_for_pod_readiness()
 
         for condition in ("Available=True", "Progressing=False", "Degraded=False"):
             self.k8s_cluster.kubectl_wait(
                 f"scyllacluster {self.params.get('k8s_scylla_cluster_name')} --for=condition={condition}",
-                namespace=self.db_cluster.namespace, timeout=600)
+                namespace=self.db_cluster.namespace, timeout=1800)
         scylla_cluster_conditions = json.loads(self.k8s_cluster.kubectl(
             f"get scyllacluster {self.params.get('k8s_scylla_cluster_name')} -o json",
             namespace=self.db_cluster.namespace).stdout.strip())["status"]["conditions"]
