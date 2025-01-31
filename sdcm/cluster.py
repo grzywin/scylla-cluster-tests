@@ -3012,11 +3012,14 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
     def get_nic_devices(self) -> List:
         """Returns list of ethernet network interfaces"""
         if self.scylla_network_configuration:
-            self.log.info("OPTION ONE")
             return [self.scylla_network_configuration.device]
-
-        result = self.remoter.run('/sbin/ip -o link show |grep ether |awk -F": " \'{print $2}\'', verbose=True)
-        self.log.info(f"OPTION TWO {result}")
+        get_ip_path = self.remoter.run('which ip', verbose=True)
+        ip_path = get_ip_path.stdout.strip()
+        self.log.info(f"KGKG {ip_path}")
+        result = self.remoter.run(f'{get_ip_path} -o link show | grep ether | awk -F": " \'{{print $2}}\'',
+                                  verbose=True)
+        self.log.info(f"KGKGKG {result}")
+        self.log.info(f"KGKGKGKG {result.stdout.strip()}")
         return result.stdout.strip().split()
 
     def run_scylla_sysconfig_setup(self) -> bool:

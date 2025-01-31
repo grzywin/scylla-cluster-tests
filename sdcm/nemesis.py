@@ -3511,7 +3511,6 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         prometheus_stats = PrometheusDBStats(host=self.monitoring_set.nodes[0].external_address)
         # If test runs with 2 network interfaces configuration, "node_network_receive_bytes_total" will be reported on device that
         # broadcast_address is configured on it
-        self.log.info(f"CHECK DEVICES KG: {self.target_node.get_nic_devices()[0]}")
         query = 'avg(node_network_receive_bytes_total{instance=~".*?%s.*?", device="%s"})' % \
                 (self.target_node.ip_address, self.target_node.get_nic_devices()[0])
         now = time.time()
