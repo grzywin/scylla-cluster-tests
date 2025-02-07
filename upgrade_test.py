@@ -1253,8 +1253,7 @@ class UpgradeTest(FillDatabaseData, loader_utils.LoaderUtilsMixin):
         for _ in range(20):
             scylla_cluster_conditions = json.loads(self.k8s_cluster.kubectl(
                 f"get scyllacluster {self.params.get('k8s_scylla_cluster_name')} -o json",
-                namespace=self.db_cluster.namespace
-            ).stdout.strip())["status"]["conditions"]
+                namespace=self.db_cluster.namespace).stdout.strip())["status"]["conditions"]
 
             for condition in scylla_cluster_conditions:
                 if condition["type"] == "Available":
