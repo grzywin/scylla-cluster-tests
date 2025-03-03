@@ -78,10 +78,14 @@ def is_tablets_feature_enabled(node) -> bool:
     """ Check whether tablets enabled
     """
     with node.remote_scylla_yaml() as scylla_yaml:
-        # for backward compatibility of 2024.1 and earlier
-        if "tablets" in scylla_yaml.experimental_features:
+        if isinstance(scylla_yaml, dict):
+            scylla_dict = scylla_yaml
+        else:
+            scylla_dict = scylla_yaml.dict()
+
+        if "tablets" in scylla_dict.get("experimental_features", []):
             return True
-        if scylla_yaml.dict().get("enable_tablets"):
+        if scylla_dict.get("enable_tablets"):
             return True
 
     return False
