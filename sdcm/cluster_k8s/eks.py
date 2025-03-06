@@ -431,15 +431,47 @@ class EksCluster(KubernetesCluster, EksClusterCleanupMixin):  # pylint: disable=
             tags=self.tags,
         )
 
+        if wait_till_functional:
+            wait_for(lambda: self.cluster_status == 'ACTIVE', step=60, throw_exc=True, timeout=1200,
+                     text=f'Waiting till EKS cluster {self.short_cluster_name} become operational')
+
         self.eks_client.create_addon(
             clusterName=self.short_cluster_name,
             addonName='vpc-cni',
             addonVersion=self.vpc_cni_version,
         )
 
-        if wait_till_functional:
-            wait_for(lambda: self.cluster_status == 'ACTIVE', step=60, throw_exc=True, timeout=1200,
-                     text=f'Waiting till EKS cluster {self.short_cluster_name} become operational')
+        def is_addon_ready():
+            vpc_cni_addon_info = self.eks_client.describe_addon(
+                clusterName=self.short_cluster_name,
+                addonName='vpc-cni'
+            )
+            status = vpc_cni_addon_info['addon']['status']
+
+            if status in {'ACTIVE', 'CREATE_FAILED'}:
+                return status
+            return None
+
+        addon_status = wait_for(is_addon_ready, step=30, throw_exc=True, timeout=900,
+                                text="Waiting for 'vpc-cni' addon to be ACTIVE or CREATE_FAILED")
+
+        if addon_status == 'CREATE_FAILED':
+            self.log.warning("Addon 'vpc-cni' is in FAILED state. Recreating it...")
+
+            self.eks_client.delete_addon(
+                clusterName=self.short_cluster_name,
+                addonName='vpc-cni'
+            )
+
+            # We could arrange here some smart 'wait for deletion' implementation, but I don't want to overcomplicate
+            # stuff as deletion of addon is quick and additionally scenario where it fails is relatively rare
+            time.sleep(30)
+
+            self.eks_client.create_addon(
+                clusterName=self.short_cluster_name,
+                addonName='vpc-cni',
+                addonVersion=self.vpc_cni_version,
+            )
 
     @property
     def cluster_info(self) -> dict:
