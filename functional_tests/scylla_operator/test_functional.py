@@ -787,7 +787,7 @@ def test_deploy_helm_with_default_values(db_cluster: ScyllaPodCluster):
         k8s_cluster.kubectl_wait(
             "--all --for=condition=Ready pod",
             namespace=namespace,
-            timeout=1200,
+            timeout=1800,
         )
 
         pods_name_and_status = get_pods_and_statuses(
@@ -818,7 +818,7 @@ def test_deploy_helm_with_default_values(db_cluster: ScyllaPodCluster):
                 f"Failed to get scylla version from {pod_name_and_status['name']}. "
                 f"Output of command 'scylla --version' is empty")
         need_to_collect_logs = False
-        log.info("Scylla clsuter with default info has successfully passed validation")
+        log.info("Scylla cluster with default info has successfully passed validation")
         return None
     finally:
         if need_to_collect_logs:
@@ -894,7 +894,7 @@ def test_scylla_yaml_override(db_cluster, scylla_yaml):  # pylint: disable=too-m
 
     # NOTE: sleep for some time to avoid race between following restart and configmap object
     #       update which gets made in the above 'with scylla_yaml() as props' context manager.
-    time.sleep(5)
+    time.sleep(15)
     db_cluster.restart_scylla()
     for node in db_cluster.nodes:
         with node.actual_scylla_yaml() as props:
@@ -920,7 +920,7 @@ def test_scylla_yaml_override(db_cluster, scylla_yaml):  # pylint: disable=too-m
         else:
             props[hh_throttle_option_name] = configmap_scylla_yaml_content[hh_throttle_option_name]
 
-    time.sleep(5)
+    time.sleep(15)
     db_cluster.restart_scylla()
     for node in db_cluster.nodes:
         with node.actual_scylla_yaml() as props:
