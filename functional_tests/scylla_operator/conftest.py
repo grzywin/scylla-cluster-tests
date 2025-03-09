@@ -237,13 +237,3 @@ def skip_if_no_tls(request, tester: ScyllaOperatorFunctionalClusterTester) -> No
             and not tester.params.get("k8s_enable_tls")
             and not tester.params.get("k8s_enable_sni")):
         pytest.skip('test requires k8s_enable_tls to be enabled')
-
-
-def pytest_collection_modifyitems(items):
-    order = {
-        "test_scylla_yaml_override": 1,
-        "test_orphaned_services_multi_rack": 2,
-        "test_deploy_helm_with_default_values": 3,
-        "test_nodetool_flush_and_reshard": 4,
-    }
-    items.sort(key=lambda item: order.get(item.name, len(items)))
