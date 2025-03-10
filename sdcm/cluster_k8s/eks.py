@@ -140,6 +140,13 @@ def deploy_k8s_eks_cluster(k8s_cluster) -> None:
             disk_size=params.get('root_disk_size_monitor'),
             k8s_cluster=k8s_cluster))
     k8s_cluster.wait_all_node_pools_to_be_ready()
+
+    # TODO: think if we need to pin version, or select base on k8s version
+    k8s_cluster.eks_client.create_addon(
+        clusterName=k8s_cluster.short_cluster_name,
+        addonName='aws-ebs-csi-driver',
+    )
+
     k8s_cluster.configure_ebs_csi_driver()
 
     k8s_cluster.deploy_cert_manager(pool_name=k8s_cluster.AUXILIARY_POOL_NAME)
@@ -423,19 +430,48 @@ class EksCluster(KubernetesCluster, EksClusterCleanupMixin):  # pylint: disable=
             },
             tags=self.tags,
         )
+
+        if wait_till_functional:
+            wait_for(lambda: self.cluster_status == 'ACTIVE', step=60, throw_exc=True, timeout=1200,
+                     text=f'Waiting till EKS cluster {self.short_cluster_name} become operational')
+
         self.eks_client.create_addon(
             clusterName=self.short_cluster_name,
             addonName='vpc-cni',
             addonVersion=self.vpc_cni_version
         )
-        # TODO: think if we need to pin version, or select base on k8s version
-        self.eks_client.create_addon(
-            clusterName=self.short_cluster_name,
-            addonName='aws-ebs-csi-driver',
-        )
-        if wait_till_functional:
-            wait_for(lambda: self.cluster_status == 'ACTIVE', step=60, throw_exc=True, timeout=1200,
-                     text=f'Waiting till EKS cluster {self.short_cluster_name} become operational')
+
+        def is_addon_ready():
+            vpc_cni_addon_info = self.eks_client.describe_addon(
+                clusterName=self.short_cluster_name,
+                addonName='vpc-cni'
+            )
+            status = vpc_cni_addon_info['addon']['status']
+
+            if status in {'ACTIVE', 'CREATE_FAILED'}:
+                return status
+            return None
+
+        addon_status = wait_for(is_addon_ready, step=30, throw_exc=True, timeout=900,
+                                text="Waiting for 'vpc-cni' addon to be ACTIVE or CREATE_FAILED")
+
+        if addon_status == 'CREATE_FAILED':
+            self.log.warning("Addon 'vpc-cni' is in FAILED state. Recreating it...")
+
+            self.eks_client.delete_addon(
+                clusterName=self.short_cluster_name,
+                addonName='vpc-cni'
+            )
+
+            # We could arrange here some smart 'wait for deletion' implementation, but I don't want to overcomplicate
+            # stuff as deletion of addon is quick and additionally scenario where it fails is relatively rare
+            time.sleep(30)
+
+            self.eks_client.create_addon(
+                clusterName=self.short_cluster_name,
+                addonName='vpc-cni',
+                addonVersion=self.vpc_cni_version,
+            )
 
     @property
     def cluster_info(self) -> dict:
