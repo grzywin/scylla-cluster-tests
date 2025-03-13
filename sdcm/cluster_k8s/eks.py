@@ -431,15 +431,15 @@ class EksCluster(KubernetesCluster, EksClusterCleanupMixin):  # pylint: disable=
             tags=self.tags,
         )
 
+        if wait_till_functional:
+            wait_for(lambda: self.cluster_status == 'ACTIVE', step=60, throw_exc=True, timeout=1200,
+                     text=f'Waiting till EKS cluster {self.short_cluster_name} become operational')
+
         self.eks_client.create_addon(
             clusterName=self.short_cluster_name,
             addonName='vpc-cni',
             addonVersion=self.vpc_cni_version
         )
-
-        if wait_till_functional:
-            wait_for(lambda: self.cluster_status == 'ACTIVE', step=60, throw_exc=True, timeout=1200,
-                     text=f'Waiting till EKS cluster {self.short_cluster_name} become operational')
 
     @property
     def cluster_info(self) -> dict:
