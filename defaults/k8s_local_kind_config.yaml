@@ -14,7 +14,7 @@ k8s_scylla_operator_chart_version: 'latest'
 k8s_cert_manager_version: '1.8.0'
 
 k8s_scylla_cluster_name: 'sct-cluster'
-k8s_scylla_disk_gi: 10
+k8s_scylla_disk_gi: 120
 # NOTE: use any of the following pairs:
 #   'k8s_scylla_disk_class=local-raid-disks'   and 'k8s_local_volume_provisioner_type=static'
 #   'k8s_scylla_disk_class=scylladb-local-xfs' and 'k8s_local_volume_provisioner_type=dynamic'
