@@ -11,6 +11,10 @@ n_monitor_nodes: 1
 
 nemesis_class_name: 'SisyphusMonkey'
 nemesis_selector: ['kubernetes']
+
+# Turn off disrupt_mgmt_restore until https://github.com/scylladb/scylla-manager/issues/4052 will be fixed
+exclude_disruptions: ['disrupt_mgmt_restore']
+
 nemesis_seed: '026'
 
 user_prefix: 'longevity-scylla-operator-3h'

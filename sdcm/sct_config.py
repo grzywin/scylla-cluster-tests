@@ -1615,6 +1615,9 @@ class SCTConfiguration(dict):
              ALL the properties in that list which are set to true (the intersection of all properties).
              (In other words filters out all nemesis that doesn't ONE of these properties set to true)
              IMPORTANT: If a property doesn't exist, ALL the nemesis will be included."""),
+        dict(name="exclude_disruptions", env="SCT_EXCLUDE_DISRUPTIONS",
+             type=list,
+             help="Select which nemesis disruptions should be turned off"),
         dict(name="nemesis_exclude_disabled", env="SCT_NEMESIS_EXCLUDE_DISABLED",
              type=boolean, k8s_multitenancy_supported=True,
              help="""nemesis_exclude_disabled determines whether 'disabled' nemeses are filtered out from list
