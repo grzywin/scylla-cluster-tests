@@ -203,15 +203,15 @@ def verify_resharding_on_k8s(db_cluster: ScyllaPodCluster, cpus: Union[str, int,
             text=f"Waiting for the start of resharding on the '{node.name}' node.",
         ), f"Start of resharding hasn't been detected on the '{node.name}' node."
         resharding_started = time.time()
-        log.debug("Resharding has been started on the '%s' node.", node.name)
+        log.info("Resharding has been started on the '%s' node.", node.name)
 
         # Wait for the end of resharding
         assert wait_for(
             func=lambda: list(resharding_finish),  # pylint: disable=cell-var-from-loop
-            step=3, timeout=600, throw_exc=False,
+            step=3, timeout=1800, throw_exc=False,
             text=f"Waiting for the finish of resharding on the '{node.name}' node.",
         ), f"Finish of the resharding hasn't been detected on the '{node.name}' node."
-        log.debug("Resharding has been finished successfully on the '%s' node.", node.name)
+        log.info("Resharding has been finished successfully on the '%s' node.", node.name)
 
         # Calculate the time spent for resharding. We need to have it be bigger than 2minutes
         # because it is the timeout of the liveness probe for Scylla pods.

@@ -2023,13 +2023,13 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
 
     def build_list_of_disruptions_to_execute(self, nemesis_selector: str | None = None, nemesis_multiply_factor=1):
         """
-        Builds the list of disruptions that should be excuted during a test.
+        Builds the list of disruptions that should be executed during a test.
 
-        nemesis_selector: should be retrived from the test yaml by using the "nemesis_selector".
+        nemesis_selector: should be retrieved from the test yaml by using the "nemesis_selector".
         Here it kept for future usages and unit testing ability.
         more about nemesis_selector behaviour in sct_config.py
 
-        nemesis_multiply_factor: should be retrived from the test yaml by using the "nemesis_multiply_factor".
+        nemesis_multiply_factor: should be retrieved from the test yaml by using the "nemesis_multiply_factor".
         Here it kept for future usages and unit testing ability.
         more about nemesis_selector behaviour in sct_config.py
         """
@@ -2048,6 +2048,9 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
 
         if nemesis_multiply_factor:
             disruptions = disruptions * nemesis_multiply_factor
+
+        exclude_disruptions = self.tester.params.get("exclude_disruptions")
+        disruptions = [disruption for disruption in disruptions if disruption.__name__ not in exclude_disruptions]
 
         self.disruptions_list.extend(disruptions)
         return self.disruptions_list

@@ -1618,6 +1618,9 @@ class SCTConfiguration(dict):
                 nemesis_selector: "disruptive and not (sla or limited or manager_operation or config_changes)" # complex one
              ```
              """),
+        dict(name="exclude_disruptions", env="SCT_EXCLUDE_DISRUPTIONS",
+             type=list,
+             help="Select which nemesis disruptions should be turned off"),
         dict(name="nemesis_exclude_disabled", env="SCT_NEMESIS_EXCLUDE_DISABLED",
              type=boolean, k8s_multitenancy_supported=True,
              help="""nemesis_exclude_disabled determines whether 'disabled' nemeses are filtered out from list
@@ -1700,8 +1703,6 @@ class SCTConfiguration(dict):
         dict(name="simulated_racks", env="SCT_SIMULATED_RACKS", type=int,
              help="""Forces GossipingPropertyFileSnitch (regardless `endpoint_snitch`) to simulate racks.
              Provide number of racks to simulate."""),
-        dict(name="rack_aware_loader", env="SCT_RACK_AWARE_LOADER", type=boolean,
-             help="When enabled, loaders will look for nodes on the same rack."),
 
         dict(name="use_dns_names", env="SCT_USE_DNS_NAMES", type=boolean,
              help="""Use dns names instead of ip addresses for nodes in cluster"""),

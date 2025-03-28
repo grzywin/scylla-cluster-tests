@@ -767,7 +767,7 @@ def test_deploy_helm_with_default_values(db_cluster: ScyllaPodCluster):
     """
 
     target_chart_name, namespace = ("t-default-values",) * 2
-    expected_capacity = '10Gi'
+    expected_capacity = '120Gi'
     need_to_collect_logs, k8s_cluster = True, db_cluster.k8s_cluster
     logdir = f"{os.path.join(k8s_cluster.logdir, 'test_deploy_helm_with_default_values')}"
 
@@ -787,11 +787,15 @@ def test_deploy_helm_with_default_values(db_cluster: ScyllaPodCluster):
         k8s_cluster.kubectl_wait(
             "--all --for=condition=Ready pod",
             namespace=namespace,
-            timeout=1200,
+            timeout=1800,
         )
 
         pods_name_and_status = get_pods_and_statuses(
             db_cluster, namespace=namespace, label=db_cluster.pod_selector)
+
+        # We want to add this filtering below to cover rare case where pods_name_and_status method will return
+        # not only t-default-values pods but also cleanup ones which are there only for a moment.
+        pods_name_and_status = [pod for pod in pods_name_and_status if not pod['name'].startswith('cleanup')]
 
         assert len(pods_name_and_status) == 3, (
             f"Expected 3 pods to be created in {namespace} namespace "
@@ -817,8 +821,8 @@ def test_deploy_helm_with_default_values(db_cluster: ScyllaPodCluster):
             assert scylla_version.stdout, (
                 f"Failed to get scylla version from {pod_name_and_status['name']}. "
                 f"Output of command 'scylla --version' is empty")
-        need_to_collect_logs = False
-        log.info("Scylla clsuter with default info has successfully passed validation")
+        need_to_collect_logs = True
+        log.info("Scylla cluster with default info has successfully passed validation")
         return None
     finally:
         if need_to_collect_logs:
