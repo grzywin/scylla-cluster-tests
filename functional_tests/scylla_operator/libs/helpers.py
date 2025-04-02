@@ -197,31 +197,27 @@ def verify_resharding_on_k8s(db_cluster: ScyllaPodCluster, cpus: Union[str, int,
     # In K8S it starts from the last node of a rack and then goes to previous ones.
     # One resharding with 100Gb+ may take about 3-4 minutes. So, set 5 minutes timeout per node.
     for node, liveness_probe_failures, resharding_start, resharding_finish in nodes_data:
+        log.info(f"KG START CHECK BEFORE first wait_for {list(resharding_start)}")
         assert wait_for(
             func=lambda: list(resharding_start),  # pylint: disable=cell-var-from-loop
             step=3, timeout=900, throw_exc=False,
             text=f"Waiting for the start of resharding on the '{node.name}' node.",
         ), f"Start of resharding hasn't been detected on the '{node.name}' node."
 
-        log.info("Resharding Start KG")
-        for line in resharding_start:
-            log.info(line)
-        log.info("END Resharding Start KG")
+        log.info(f"KG START CHECK AFTER first wait_for {list(resharding_start)}")
 
         resharding_started = time.time()
         log.info("Resharding has been started on the '%s' node.", node.name)
 
         # Wait for the end of resharding
+        log.info(f"KG FINISH CHECK BEFORE second wait_for {list(resharding_finish)}")
         assert wait_for(
             func=lambda: list(resharding_finish),  # pylint: disable=cell-var-from-loop
             step=3, timeout=1800, throw_exc=False,
             text=f"Waiting for the finish of resharding on the '{node.name}' node.",
         ), f"Finish of the resharding hasn't been detected on the '{node.name}' node."
 
-        log.info("Resharding Finish KG")
-        for line in resharding_finish:
-            log.info(line)
-        log.info("END Resharding Finish KG")
+        log.info(f"KG FINISH CHECK AFTER second wait_for {list(resharding_finish)}")
 
         log.info("Resharding has been finished successfully on the '%s' node.", node.name)
 

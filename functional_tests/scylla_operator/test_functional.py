@@ -1090,7 +1090,7 @@ def test_can_recover_from_fatal_pod_termination(db_cluster):
 
 # NOTE: non-fast K8S backends such as 'k8s-gke' and 'k8s-local-kind' are affected by following bug:
 #       https://github.com/scylladb/scylla-operator/issues/1077
-@pytest.mark.requires_backend("k8s-eks")
+# @pytest.mark.requires_backend("k8s-eks")
 def test_nodetool_flush_and_reshard(db_cluster: ScyllaPodCluster):
     target_node = db_cluster.nodes[0]
 
