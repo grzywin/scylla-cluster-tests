@@ -1,3 +1,2 @@
 instance_type_runner: c6i.2xlarge
-root_disk_size_runner: 1024
-root_disk_size_db: 512
+root_disk_size_runner: 140
