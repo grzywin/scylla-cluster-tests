@@ -178,17 +178,17 @@ def verify_resharding_on_k8s(db_cluster: ScyllaPodCluster, cpus: Union[str, int,
 
     log.info("Update the cpu count to '%s' CPUs to make Scylla start the resharding process on "
              "all the nodes 1 by 1", cpus)
-    # db_cluster.replace_scylla_cluster_value(
-    #     "/spec/datacenter/racks/0/resources", {
-    #         "limits": {
-    #             "cpu": cpus,
-    #             "memory": db_cluster.k8s_cluster.scylla_memory_limit,
-    #         },
-    #         "requests": {
-    #             "cpu": cpus,
-    #             "memory": db_cluster.k8s_cluster.scylla_memory_limit,
-    #         },
-    #     })
+    db_cluster.replace_scylla_cluster_value(
+        "/spec/datacenter/racks/0/resources", {
+            "limits": {
+                "cpu": cpus,
+                "memory": db_cluster.k8s_cluster.scylla_memory_limit,
+            },
+            "requests": {
+                "cpu": cpus,
+                "memory": db_cluster.k8s_cluster.scylla_memory_limit,
+            },
+        })
 
     search_period = 5
     for node in reversed(db_cluster.nodes):
