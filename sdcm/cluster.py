@@ -172,8 +172,8 @@ from sdcm.utils.replication_strategy_utils import ReplicationStrategy, DataCente
 # are supposed to run longer than 24 hours from being killed
 SCYLLA_DIR = "/var/lib/scylla"
 
-DB_LOG_PATTERN_RESHARDING_START = "(?i).*database - Resharding.*"
-DB_LOG_PATTERN_RESHARDING_FINISH = "(?i).*storage_service - Restarting a node in NORMAL.*"
+DB_LOG_PATTERN_RESHARDING_START = "database - Resharding"
+DB_LOG_PATTERN_RESHARDING_FINISH = "storage_service - Restarting a node in NORMAL"
 
 SPOT_TERMINATION_CHECK_DELAY = 5
 

@@ -1104,10 +1104,7 @@ def test_nodetool_flush_and_reshard(db_cluster: ScyllaPodCluster):
     target_node.run_nodetool("flush -- keyspace1")
 
     try:
-        # Change number of CPUs dedicated for Scylla pods
-        # and make sure that the resharding process begins and finishes
         verify_resharding_on_k8s(db_cluster, new_cpus)
     finally:
-        # Return the cpu count back and wait for the resharding begin and finish
         pass
         # verify_resharding_on_k8s(db_cluster, db_cluster.k8s_cluster.scylla_cpu_limit)
