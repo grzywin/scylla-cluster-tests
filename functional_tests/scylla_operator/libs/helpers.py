@@ -213,7 +213,7 @@ def verify_resharding_on_k8s(db_cluster: ScyllaPodCluster, cpus: Union[str, int,
             if reshard_start_found and reshard_finish_found:
                 break
 
-            time.sleep(search_period)
+            time.sleep(search_period - 1)
 
         log.info("Resharding has been finished successfully on the '%s' node.", node.name)
 
