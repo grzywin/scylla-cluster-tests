@@ -174,8 +174,8 @@ def verify_resharding_on_k8s(db_cluster: ScyllaPodCluster, cpus: Union[str, int,
     for node in reversed(db_cluster.nodes):
         liveness_probe_failures = node.follow_system_log(
             patterns=["healthz probe: can't connect to JMX"])
-        resharding_start = node.follow_system_log(patterns=[DB_LOG_PATTERN_RESHARDING_START], start_from_beginning=True)
-        resharding_finish = node.follow_system_log(patterns=[DB_LOG_PATTERN_RESHARDING_FINISH], start_from_beginning=True)
+        resharding_start = node.follow_system_log(patterns=[DB_LOG_PATTERN_RESHARDING_START])
+        resharding_finish = node.follow_system_log(patterns=[DB_LOG_PATTERN_RESHARDING_FINISH])
         nodes_data.append((node, liveness_probe_failures, resharding_start, resharding_finish))
 
     log.info(
