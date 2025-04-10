@@ -30,9 +30,10 @@ import traceback
 import json
 import itertools
 import enum
+import ast
 from contextlib import ExitStack, contextmanager
 from typing import Any, List, Optional, Type, Tuple, Callable, Dict, Set, Union, Iterable
-from functools import wraps, partial
+from functools import wraps, partial, lru_cache
 from collections import defaultdict, Counter, namedtuple
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -99,7 +100,6 @@ from sdcm.sct_events.loaders import CassandraStressLogEvent, ScyllaBenchEvent
 from sdcm.sct_events.nemesis import DisruptionEvent
 from sdcm.sct_events.system import InfoEvent, CoreDumpEvent
 from sdcm.sla.sla_tests import SlaTests
-from sdcm.stress_thread import DockerBasedStressThread
 from sdcm.utils.aws_kms import AwsKms
 from sdcm.utils import cdc
 from sdcm.utils.adaptive_timeouts import adaptive_timeout, Operations
@@ -112,7 +112,7 @@ from sdcm.utils.features import is_tablets_feature_enabled
 from sdcm.utils.quota import configure_quota_on_node_for_scylla_user_context, is_quota_enabled_on_node, enable_quota_on_node, \
     write_data_to_reach_end_of_quota
 from sdcm.utils.compaction_ops import CompactionOps, StartStopCompactionArgs
-from sdcm.utils.context_managers import nodetool_context
+from sdcm.utils.context_managers import nodetool_context, DbNodeLogger
 from sdcm.utils.decorators import retrying, latency_calculator_decorator
 from sdcm.utils.decorators import timeout as timeout_decor
 from sdcm.utils.decorators import skip_on_capacity_issues
@@ -166,6 +166,7 @@ from test_lib.compaction import CompactionStrategy, get_compaction_strategy, get
 from test_lib.cql_types import CQLTypeBuilder
 from test_lib.sla import ServiceLevel, MAX_ALLOWED_SERVICE_LEVELS
 from sdcm.utils.topology_ops import FailedDecommissionOperationMonitoring
+from sdcm.utils.ast_utils import BooleanEvaluator
 
 
 LOGGER = logging.getLogger(__name__)
@@ -181,6 +182,9 @@ EXCLUSIVE_NEMESIS_NAMES = (
 
 NEMESIS_TARGET_SELECTION_LOCK = Lock()
 DISRUPT_POOL_PROPERTY_NAME = "target_pool"
+
+
+DISRUPT_METHOD_IDENTIFY_REGEX = re.compile(r"self\.(?P<method_name>disrupt_[0-9A-Za-z_]+?)\(.*\)", re.MULTILINE)
 
 
 class NEMESIS_TARGET_POOLS(enum.Enum):
@@ -257,7 +261,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         self.interval = 60 * self.tester.params.get('nemesis_interval')  # convert from min to sec
         self.start_time = time.time()
         self.stats = {}
-        self.nemesis_selector_list = nemesis_selector or []
+        self.nemesis_selector = nemesis_selector
         # NOTE: 'cluster_index' is set in K8S multitenant case
         if hasattr(self.tester, "cluster_index"):
             tenant_short_name = f"db{self.tester.cluster_index}"
@@ -443,10 +447,11 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         if is_seed is DefaultValue - if self.filter_seed is True it act as if is_seed=False,
           otherwise it will act as if is_seed is None
         """
-        # first give up the current target node
-        self.unset_current_running_nemesis(self.target_node)
-
         with NEMESIS_TARGET_SELECTION_LOCK:
+            # first give up the current target node
+            if self.target_node:
+                self.target_node.running_nemesis = None
+
             nodes = self._get_target_nodes(is_seed=is_seed, dc_idx=dc_idx, rack=rack)
             if not nodes:
                 dc_str = '' if dc_idx is None else f'dc {dc_idx} '
@@ -559,7 +564,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             manager_operation: Optional[bool] = None,
             zero_node_changes: Optional[bool] = None,
     ) -> List[str]:
-        subclasses_list = self._get_subclasses(
+        args = dict(
             disruptive=disruptive,
             supports_high_disk_utilization=supports_high_disk_utilization,
             run_with_gemini=run_with_gemini,
@@ -572,21 +577,28 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             free_tier_set=free_tier_set,
             sla=sla,
             manager_operation=manager_operation,
+            zero_node_changes=zero_node_changes
         )
+        logical_phrase = " and ".join([key for key, val in args.items() if val])
+        subclasses_list = self._get_subclasses(logical_phrase=logical_phrase)
+
         disrupt_methods_list = []
         for subclass in subclasses_list:
-            method_name = re.search(
-                r'self\.(?P<method_name>disrupt_[A-Za-z_]+?)\(.*\)', inspect.getsource(subclass), flags=re.MULTILINE)
-            if method_name:
-                disrupt_methods_list.append(method_name.group('method_name'))
+            if method_name := self.get_disrupt_method_from_class(subclass):
+                disrupt_methods_list.append(method_name)
         self.log.debug("Gathered subclass methods: {}".format(disrupt_methods_list))
         return disrupt_methods_list
 
-    def get_list_of_subclasses_by_property_name(self, list_of_properties_to_include):
-        flags = {flag_name.strip('!'): not flag_name.startswith(
-            '!') for flag_name in list_of_properties_to_include}
-        subclasses_list = self._get_subclasses(**flags)
+    def get_list_of_subclasses_by_property_name(self, filter_logical_phrase: str | None):
+        subclasses_list = self._get_subclasses(logical_phrase=filter_logical_phrase)
         return subclasses_list
+
+    @staticmethod
+    @lru_cache
+    def get_disrupt_method_from_class(nemesis_cls):
+        method_name = DISRUPT_METHOD_IDENTIFY_REGEX.search(inspect.getsource(nemesis_cls))
+        if method_name:
+            return method_name.group("method_name")
 
     def get_list_of_disrupt_methods(self, subclasses_list, export_properties=False):
         disrupt_methods_objects_list = []
@@ -596,15 +608,14 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         for subclass in subclasses_list:
             properties_list = []
             per_method_properties = {}
-            method_name = re.search(
-                r'self\.(?P<method_name>disrupt_[0-9A-Za-z_]+?)\(.*\)', inspect.getsource(subclass), flags=re.MULTILINE)
+
             for attribute in subclass.__dict__.keys():
                 if attribute[:2] != '__':
                     value = getattr(subclass, attribute)
                     if not callable(value):
                         properties_list.append(f"{attribute} = {value}")
-            if method_name:
-                method_name_str = method_name.group('method_name')
+
+            if method_name_str := self.get_disrupt_method_from_class(subclass):
                 disrupt_methods_names_list.append(method_name_str)
                 nemesis_classes.append(subclass.__name__)
                 if export_properties:
@@ -619,7 +630,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         return disrupt_methods_objects_list, all_methods_with_properties, nemesis_classes
 
     @classmethod
-    def _get_subclasses(cls, **flags) -> List[Type['Nemesis']]:
+    def _get_subclasses(cls, logical_phrase: str | None = None) -> List[Type['Nemesis']]:
         tmp = Nemesis.__subclasses__()
         subclasses = []
         while tmp:
@@ -627,12 +638,12 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                 subclasses.append(nemesis)
                 tmp.remove(nemesis)
                 tmp.extend(nemesis.__subclasses__())
-        return cls._get_subclasses_from_list(subclasses, **flags)
+        return cls._get_subclasses_from_list(subclasses, logical_phrase=logical_phrase)
 
-    @staticmethod
-    def _get_subclasses_from_list(
-            list_of_nemesis: List[Type['Nemesis']],
-            **flags) -> List[Type['Nemesis']]:
+    @classmethod
+    def _get_subclasses_from_list(cls,
+                                  list_of_nemesis: List[Type['Nemesis']],
+                                  logical_phrase: str | None) -> List[Type['Nemesis']]:
         """
         It apply 'and' logic to filter,
             if any value in the filter does not match what nemeses have,
@@ -640,20 +651,25 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         """
         nemesis_subclasses = []
         nemesis_to_exclude = COMPLEX_NEMESIS + DEPRECATED_LIST_OF_NEMESISES
+
+        evaluator = BooleanEvaluator()
+        if logical_phrase:
+            expression_ast = ast.parse(logical_phrase, mode="eval")
+
         for nemesis in list_of_nemesis:
             if nemesis in nemesis_to_exclude:
                 continue
-            matches = True
-            for filter_name, filter_value in flags.items():
-                if filter_value is None:
-                    continue
-                attr = getattr(nemesis, filter_name, False)
-                if attr != filter_value:
-                    matches = False
-                    break
-            if not matches:
-                continue
-            nemesis_subclasses.append(nemesis)
+            evaluator.context = dict(**nemesis.__dict__,
+                                     **{nemesis.__name__: True})
+            if (logical_phrase and 'disrupt_' in logical_phrase and
+                    (method_name := cls.get_disrupt_method_from_class(nemesis))):
+                # if the `logical_phrase` has a method name of any disrupt method
+                # we look it up for the specific class and add it to the context
+                # so we can match on those as well
+                # example: 'disrupt_create_index or disrupt_drop_index'
+                evaluator.context[method_name] = True
+            if (logical_phrase and evaluator.visit(expression_ast)) or not logical_phrase:
+                nemesis_subclasses.append(nemesis)
         return nemesis_subclasses
 
     def __str__(self):
@@ -668,7 +684,8 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                                          regex=".*Connection reset by peer.*",
                                          extra_time_to_expiration=30):
             self.log.info('Kill all scylla processes in %s', self.target_node)
-            self.target_node.remoter.sudo("pkill -9 scylla", ignore_status=True)
+            with DbNodeLogger(self.cluster.nodes, "kill all scylla processes", target_node=self.target_node):
+                self.target_node.remoter.sudo("pkill -9 scylla", ignore_status=True)
 
             # Wait for the process to be down before waiting for service to be restarted
             self.target_node.wait_db_down(check_interval=2)
@@ -777,11 +794,13 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                              timeout=compaction_args.timeout,
                              stop_func=compaction_args.compaction_ops.stop_major_compaction)
 
-        results = ParallelObject.run_named_tasks_in_parallel(
-            tasks={"trigger": trigger_func, "watcher": watch_func},
-            timeout=compaction_args.timeout + 5,
-            ignore_exceptions=True
-        )
+        with DbNodeLogger(self.cluster.nodes, "start and stop major compaction", target_node=self.target_node,
+                          additional_info=f"on {compaction_args.keyspace}.{compaction_args.columnfamily}"):
+            results = ParallelObject.run_named_tasks_in_parallel(
+                tasks={"trigger": trigger_func, "watcher": watch_func},
+                timeout=compaction_args.timeout + 5,
+                ignore_exceptions=True
+            )
 
         self._handle_start_stop_compaction_results(
             trigger_and_watcher_futures=results,
@@ -820,12 +839,12 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                              watch_for="Scrubbing",
                              timeout=compaction_args.timeout,
                              stop_func=compaction_args.compaction_ops.stop_scrub_compaction)
-
-        results = ParallelObject.run_named_tasks_in_parallel(
-            tasks={"trigger": trigger_func, "watcher": watch_func},
-            timeout=compaction_args.timeout + 5,
-            ignore_exceptions=True
-        )
+        with DbNodeLogger(self.cluster.nodes, "start and stop scrub compaction", target_node=self.target_node):
+            results = ParallelObject.run_named_tasks_in_parallel(
+                tasks={"trigger": trigger_func, "watcher": watch_func},
+                timeout=compaction_args.timeout + 5,
+                ignore_exceptions=True
+            )
 
         self._handle_start_stop_compaction_results(
             trigger_and_watcher_futures=results,
@@ -862,11 +881,12 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                              watch_for="Cleaning",
                              stop_func=compaction_args.compaction_ops.stop_cleanup_compaction)
 
-        results = ParallelObject.run_named_tasks_in_parallel(
-            tasks={"trigger": trigger_func, "watcher": watch_func},
-            timeout=compaction_args.timeout + 5,
-            ignore_exceptions=True
-        )
+        with DbNodeLogger(self.cluster.nodes, "start and stop cleanup compaction", target_node=self.target_node):
+            results = ParallelObject.run_named_tasks_in_parallel(
+                tasks={"trigger": trigger_func, "watcher": watch_func},
+                timeout=compaction_args.timeout + 5,
+                ignore_exceptions=True
+            )
 
         self._handle_start_stop_compaction_results(
             trigger_and_watcher_futures=results,
@@ -902,11 +922,12 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                              timeout=compaction_args.timeout,
                              stop_func=compaction_args.compaction_ops.stop_validation_compaction)
 
-        results = ParallelObject.run_named_tasks_in_parallel(
-            tasks={"trigger": trigger_func, "watcher": watch_func},
-            timeout=compaction_args.timeout + 5,
-            ignore_exceptions=True
-        )
+        with DbNodeLogger(self.cluster.nodes, "start and stop validation compaction", target_node=self.target_node):
+            results = ParallelObject.run_named_tasks_in_parallel(
+                tasks={"trigger": trigger_func, "watcher": watch_func},
+                timeout=compaction_args.timeout + 5,
+                ignore_exceptions=True
+            )
 
         self._handle_start_stop_compaction_results(
             trigger_and_watcher_futures=results,
@@ -921,7 +942,8 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                             line="Can't find a column family with UUID", node=self.target_node), \
             DbEventsFilter(db_event=DatabaseLogEvent.BACKTRACE,
                            line="Can't find a column family with UUID", node=self.target_node):
-            self.target_node.restart()
+            with DbNodeLogger(self.cluster.nodes, "restart node", target_node=self.target_node):
+                self.target_node.restart()
 
         self.target_node.wait_node_fully_start(timeout=28800)  # 8 hours
         self.repair_nodetool_repair()
@@ -1192,7 +1214,9 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                                                                                         ks_cf_for_destroy=tables)):
                     continue
 
-                result = self.target_node.remoter.sudo('rm -f %s' % file_group_for_destroy)
+                with DbNodeLogger(self.cluster.nodes, "remove data",
+                                  target_node=self.target_node, additional_info=file_group_for_destroy):
+                    result = self.target_node.remoter.sudo('rm -f %s' % file_group_for_destroy)
                 if result.stderr:
                     raise FilesNotCorrupted(
                         'Files were not removed. The nemesis can\'t be run. Error: {}'.format(result))
@@ -1568,7 +1592,8 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             disruption_method, node.pod_spec.node_name, node, old_uid,
             [f"{neighbour_scylla_pod.metadata.namespace}/{neighbour_scylla_pod.metadata.name}"
              for neighbour_scylla_pod in neighbour_scylla_pods])
-        getattr(node, disruption_method)()
+        with DbNodeLogger(self.cluster.nodes, ' '.join(disruption_method.split('_')), target_node=node):
+            getattr(node, disruption_method)()
         node.wait_till_k8s_pod_get_uid(ignore_uid=old_uid)
         old_uid = node.k8s_pod_uid
 
@@ -1616,10 +1641,12 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             disruption_method, node.pod_spec.node_name, node,
             [f"{neighbour_scylla_pod.metadata.namespace}/{neighbour_scylla_pod.metadata.name}"
              for neighbour_scylla_pod in neighbour_scylla_pods])
-        getattr(node, disruption_method)()
+        with DbNodeLogger(self.cluster.nodes, ' '.join(disruption_method.split('_')), target_node=node):
+            getattr(node, disruption_method)()
 
         self.log.info('Decommission %s', node)
-        dc_topology_rf_change = self.cluster.decommission(node, timeout=MAX_TIME_WAIT_FOR_DECOMMISSION)
+        with DbNodeLogger(self.cluster.nodes, "decommission node", target_node=node):
+            dc_topology_rf_change = self.cluster.decommission(node, timeout=MAX_TIME_WAIT_FOR_DECOMMISSION)
 
         new_node = self.add_new_nodes(count=1, rack=node.rack)[0]
         if dc_topology_rf_change:
@@ -1863,9 +1890,11 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                         continue
 
                     try:
-                        reach_enospc_on_node(target_node=node)
+                        with DbNodeLogger(self.cluster.nodes, "fill disk space", target_node=node):
+                            reach_enospc_on_node(target_node=node)
                     finally:
-                        clean_enospc_on_node(target_node=node, sleep_time=sleep_time)
+                        with DbNodeLogger(self.cluster.nodes, "clean disk space", target_node=node):
+                            clean_enospc_on_node(target_node=node, sleep_time=sleep_time)
 
     @target_all_nodes
     def disrupt_end_of_quota_nemesis(self, sleep_time=30):
@@ -1992,23 +2021,23 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         finally:
             self.metrics_srv.event_stop(disrupt_method_name)
 
-    def build_list_of_disruptions_to_execute(self, nemesis_selector=None, nemesis_multiply_factor=1):
+    def build_list_of_disruptions_to_execute(self, nemesis_selector: str | None = None, nemesis_multiply_factor=1):
         """
-        Builds the list of disruptions that should be excuted during a test.
+        Builds the list of disruptions that should be executed during a test.
 
-        nemesis_selector: should be retrived from the test yaml by using the "nemesis_selector".
+        nemesis_selector: should be retrieved from the test yaml by using the "nemesis_selector".
         Here it kept for future usages and unit testing ability.
         more about nemesis_selector behaviour in sct_config.py
 
-        nemesis_multiply_factor: should be retrived from the test yaml by using the "nemesis_multiply_factor".
+        nemesis_multiply_factor: should be retrieved from the test yaml by using the "nemesis_multiply_factor".
         Here it kept for future usages and unit testing ability.
         more about nemesis_selector behaviour in sct_config.py
         """
-        nemesis_selector = nemesis_selector or self.nemesis_selector_list
+        nemesis_selector = nemesis_selector or self.nemesis_selector
         nemesis_multiply_factor = self.cluster.params.get('nemesis_multiply_factor') or nemesis_multiply_factor
         if nemesis_selector:
             subclasses = self.get_list_of_subclasses_by_property_name(
-                list_of_properties_to_include=nemesis_selector)
+                filter_logical_phrase=nemesis_selector)
             if subclasses:
                 disruptions, _, _ = self.get_list_of_disrupt_methods(subclasses_list=subclasses)
             else:
@@ -2020,25 +2049,31 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         if nemesis_multiply_factor:
             disruptions = disruptions * nemesis_multiply_factor
 
+        exclude_disruptions = self.tester.params.get("exclude_disruptions")
+        disruptions = [disruption for disruption in disruptions if disruption.__name__ not in exclude_disruptions]
+
         self.disruptions_list.extend(disruptions)
         return self.disruptions_list
 
     @property
-    def nemesis_selector_list(self) -> list:
-        if self._nemesis_selector_list:
-            return self._nemesis_selector_list
+    def nemesis_selector(self) -> str:
+        if self._nemesis_selector:
+            return self._nemesis_selector
 
-        nemesis_selector = self.cluster.params.get('nemesis_selector') or []
+        nemesis_selector = self.cluster.params.get('nemesis_selector') or ''
         if self.cluster.params.get('nemesis_exclude_disabled'):
-            nemesis_selector.append('!disabled')
-        self._nemesis_selector_list = nemesis_selector
-        return self._nemesis_selector_list
+            if not nemesis_selector:
+                nemesis_selector = 'not disabled'
+            else:
+                nemesis_selector += ' and not disabled'
+        self._nemesis_selector = nemesis_selector
+        return self._nemesis_selector
 
-    @nemesis_selector_list.setter
-    def nemesis_selector_list(self, value: list):
-        self._nemesis_selector_list = value
-        if value and self.cluster.params.get('nemesis_exclude_disabled'):
-            self._nemesis_selector_list.append('!disabled')
+    @nemesis_selector.setter
+    def nemesis_selector(self, value: str):
+        self._nemesis_selector = value
+        if value and self.cluster.params.get('nemesis_exclude_disabled') and not self._nemesis_selector.endswith('and not disabled'):
+            self._nemesis_selector += ' and not disabled'
 
     @property
     def _disruption_list_names(self):
@@ -2095,23 +2130,19 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                          f"replication_factor={self.tester.reliable_replication_factor})' -log interval=5"
             cs_thread = self.tester.run_stress_thread(
                 stress_cmd=stress_cmd, keyspace_name=ks, stop_test_on_failure=False, round_robin=True)
-            cs_thread.verify_results()
-            self.stop_nemesis_on_stress_errors(cs_thread)
+            self.tester.verify_stress_thread(cs_thread, error_handler=self._nemesis_stress_failure_handler)
 
-    def stop_nemesis_on_stress_errors(self, stress_thread: DockerBasedStressThread) -> None:
-        # Some implementations of stress threads override logic of the base class method
-        # DockerBasedStressThread.get_results() and filter out 'events' portion of a result (e.g. c-s stress thread).
-        # To retrieve all results of a thread we need to call the base class method directly
-        stress_results = super(stress_thread.__class__, stress_thread).get_results()
-        node_errors = {}
-        for node, _, event in stress_results:
-            if event.errors:
-                node_errors.setdefault(node.name, []).extend(event.errors)
+    def _nemesis_stress_failure_handler(self, stress_pool, errors):
+        """
+        Error handler for nemesis thread - aborts the nemesis if a stress command failed on all loaders
 
-        if len(node_errors) == len(stress_results):  # stop only if stress command failed on all loaders
-            errors_str = ''.join(f"  on node '{node_name}': {errors}\n" for node_name, errors in node_errors.items())
+        :param stress_pool: list, pool of stress threads that were executing the stress command
+        :param errors: dict, errors occurred on each loader
+        """
+        if len(errors) == len(stress_pool.get_results()):
+            errors_str = ''.join(f" on node '{node_name}': {errors}\n" for node_name, errors in errors.items())
             raise NemesisStressFailure(
-                f"Aborting '{self.__class__.__name__}' nemesis as '{stress_thread.stress_cmd}' stress command failed "
+                f"Aborting '{self.__class__.__name__}' nemesis as stress command failed "
                 f"with the following errors:\n{errors_str}")
 
     @scylla_versions(("5.2.rc0", None), ("2023.1.rc0", None))
@@ -2158,8 +2189,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                      f"-keyspace {ks_name} -table {table}"
         bench_thread = self.tester.run_stress_thread(
             stress_cmd=stress_cmd, stop_test_on_failure=False)
-        self.tester.verify_stress_thread(bench_thread)
-        self.stop_nemesis_on_stress_errors(bench_thread)
+        self.tester.verify_stress_thread(bench_thread, error_handler=self._nemesis_stress_failure_handler)
 
         # In order to workaround issue #4924 when truncate timeouts, we try to flush before truncate.
         with adaptive_timeout(Operations.FLUSH, self.target_node, timeout=HOUR_IN_SEC * 2):
@@ -2840,7 +2870,9 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                 compaction_properties = get_table_compaction_info(
                     keyspace=keyspace, table=table, session=session
                 )
-        ttl_to_set = calculate_allowed_twcs_ttl(compaction_properties, default_min_ttl, default_max_ttl)
+            ttl_to_set = calculate_allowed_twcs_ttl(compaction_properties, default_min_ttl, default_max_ttl)
+        else:
+            ttl_to_set = default_max_ttl
 
         InfoEvent(f'New default time to live to be set: {ttl_to_set}, for table: {keyspace_table}').publish()
         self._modify_table_property(name="default_time_to_live", val=ttl_to_set,
@@ -3151,7 +3183,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                                                       keyspace_name=chosen_snapshot_info["keyspace_name"],
                                                       number_of_rows=chosen_snapshot_info["number_of_rows"])
         for stress in stress_queue:
-            is_passed = self.tester.verify_stress_thread(cs_thread_pool=stress)
+            is_passed = self.tester.verify_stress_thread(stress)
             assert is_passed, (
                 "Data verification stress command, triggered by the 'mgmt_restore' nemesis, has failed")
 
@@ -3287,10 +3319,11 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                 DbEventsFilter(db_event=DatabaseLogEvent.RUNTIME_ERROR,
                                line="Failed to repair",
                                node=self.target_node):
-                self.target_node.remoter.run(
-                    "curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json'"
-                    " http://127.0.0.1:10000/storage_service/force_terminate_repair"
-                )
+                with DbNodeLogger(self.cluster.nodes, "abort repair streaming", target_node=self.target_node):
+                    self.target_node.remoter.run(
+                        "curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json'"
+                        " http://127.0.0.1:10000/storage_service/force_terminate_repair"
+                    )
                 thread.result(timeout=120)
                 time.sleep(10)  # to make sure all failed logs/events, are ignored correctly
 
@@ -3570,7 +3603,8 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         else:
             interruptions.append("rate")
         duration = f"{random.choice(list_of_timeout_options)}s"
-        match random.choice(interruptions):
+        interruption = random.choice(interruptions)
+        match interruption:
             case "delay":
                 delay_in_msecs = random.randrange(50, 300)
                 jitter = delay_in_msecs * 0.2
@@ -3598,8 +3632,9 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                             duration, rate_limit, limit)
                 experiment = NetworkBandwidthLimitExperiment(
                     self.target_node, duration, rate=rate_limit, limit=limit, buffer=10000)
-        experiment.start()
-        experiment.wait_until_finished()
+        with DbNodeLogger(self.cluster.nodes, f"network {interruption} interruption", target_node=self.target_node):
+            experiment.start()
+            experiment.wait_until_finished()
         self.cluster.wait_all_nodes_un()
 
     @target_all_nodes
@@ -3658,7 +3693,8 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         with context_manager:
             self.target_node.traffic_control(None)
             try:
-                self.target_node.traffic_control(selected_option)
+                with DbNodeLogger(self.cluster.nodes, f"network {option_name} interruption", target_node=self.target_node):
+                    self.target_node.traffic_control(selected_option)
                 time.sleep(wait_time)
             finally:
                 self.target_node.traffic_control(None)
@@ -3667,7 +3703,9 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
     def _disrupt_network_block_k8s(self, list_of_timeout_options):
         duration = f"{random.choice(list_of_timeout_options)}s"
         experiment = NetworkPacketLossExperiment(self.target_node, duration, probability=100)
-        experiment.start()
+        with DbNodeLogger(self.cluster.nodes, "block network traffic",
+                          target_node=self.target_node, additional_info=f"for {duration}sec"):
+            experiment.start()
         experiment.wait_until_finished()
         time.sleep(15)
         self.cluster.wait_all_nodes_un()
@@ -3698,7 +3736,9 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         with context_manager:
             self.target_node.traffic_control(None)
             try:
-                self.target_node.traffic_control(selected_option)
+                with DbNodeLogger(self.cluster.nodes, "block network traffic",
+                                  target_node=self.target_node, additional_info=f"for {wait_time}sec"):
+                    self.target_node.traffic_control(selected_option)
                 time.sleep(wait_time)
             finally:
                 self.target_node.traffic_control(None)
@@ -4331,10 +4371,9 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         self.log.info("Doubling the load on the cluster for %s minutes", duration)
         stress_queue = self.tester.run_stress_thread(
             stress_cmd=self.tester.stress_cmd, stress_num=1, stats_aggregate_cmds=False, duration=duration)
-        results = self.tester.get_stress_results(queue=stress_queue, store_results=False)
-        self.stop_nemesis_on_stress_errors(stress_queue)
+        results = self.tester.verify_stress_thread(thread_pool=stress_queue,
+                                                   error_handler=self._nemesis_stress_failure_handler)
         self.log.info(f"Double load results: {results}")
-        return stress_queue
 
     @target_data_nodes
     def disrupt_grow_shrink_cluster(self):
@@ -4508,8 +4547,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                     new_severity=Severity.WARNING, event_class=DatabaseLogEvent, extra_time_to_expiration=30,
                     regex=".*sstable - Error while linking SSTable.*filesystem error: stat failed: No such file or directory.*"):
                 write_thread = self.tester.run_stress_thread(stress_cmd=write_cmd, stop_test_on_failure=False)
-                self.tester.verify_stress_thread(write_thread)
-                self.stop_nemesis_on_stress_errors(write_thread)
+                self.tester.verify_stress_thread(write_thread, error_handler=self._nemesis_stress_failure_handler)
 
         try:
             for i in range(2 if (aws_kms and kms_key_alias_name and enable_kms_key_rotation) else 1):
@@ -4528,8 +4566,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                     f" -keyspace {keyspace_name} -table {table_name} -timeout=120s -validate-data"
                     " -iterations=1 -concurrency=10 -connection-count=10 -rows-per-request=10")
                 read_thread = self.tester.run_stress_thread(stress_cmd=read_cmd, stop_test_on_failure=False)
-                self.tester.verify_stress_thread(read_thread)
-                self.stop_nemesis_on_stress_errors(read_thread)
+                self.tester.verify_stress_thread(read_thread, error_handler=self._nemesis_stress_failure_handler)
 
                 # Rotate KMS key
                 if enable_kms_key_rotation and aws_kms and kms_key_alias_name and i == 0:
@@ -4554,8 +4591,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
 
                 # ReRead data
                 read_thread2 = self.tester.run_stress_thread(stress_cmd=read_cmd, stop_test_on_failure=False)
-                self.tester.verify_stress_thread(read_thread2)
-                self.stop_nemesis_on_stress_errors(read_thread2)
+                self.tester.verify_stress_thread(read_thread2, error_handler=self._nemesis_stress_failure_handler)
 
                 # ReWrite data making the sstables be rewritten
                 run_write_scylla_bench_load(write_cmd)
@@ -4563,8 +4599,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
 
                 # ReRead data
                 read_thread3 = self.tester.run_stress_thread(stress_cmd=read_cmd, stop_test_on_failure=False)
-                self.tester.verify_stress_thread(read_thread3)
-                self.stop_nemesis_on_stress_errors(read_thread3)
+                self.tester.verify_stress_thread(read_thread3, error_handler=self._nemesis_stress_failure_handler)
 
                 # Check that sstables of that table are not encrypted anymore
                 check_encryption_fact(sstable_util, False)
@@ -4666,13 +4701,17 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
         self.log.info('Try to allocate 90% available memory')
         experiment = MemoryStressExperiment(pod=self.target_node, duration=f"{duration}s",
                                             workers=1, size="90%", time_to_reach=f"{time_to_reach_secs}s")
-        experiment.start()
+        with DbNodeLogger(self.cluster.nodes, "start memory stress",
+                          target_node=self.target_node, additional_info="allocate 90% of available memory"):
+            experiment.start()
         experiment.wait_until_finished()
 
         self.log.info('Try to allocate 100% total memory')
         experiment = MemoryStressExperiment(pod=self.target_node, duration=f"{duration}s",
                                             workers=1, size="100%", time_to_reach=f"{time_to_reach_secs}s")
-        experiment.start()
+        with DbNodeLogger(self.cluster.nodes, "start memory stress",
+                          target_node=self.target_node, additional_info="allocate 100% of total memory"):
+            experiment.start()
         experiment.wait_until_finished()
 
     @decorate_with_context(ignore_reactor_stall_errors)
@@ -4702,8 +4741,10 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             raise UnsupportedNemesis(f"{self.target_node.distro} OS not supported!")
 
         self.log.info('Try to allocate 90% total memory, the allocated memory will be swaped out')
-        self.target_node.remoter.run(
-            "stress-ng --vm-bytes $(awk '/MemTotal/{printf \"%d\\n\", $2 * 0.9;}' < /proc/meminfo)k --vm-keep -m 1 -t 100")
+        with DbNodeLogger(self.cluster.nodes, "start memory stress",
+                          target_node=self.target_node, additional_info="allocate 90% of total memory"):
+            self.target_node.remoter.run(
+                "stress-ng --vm-bytes $(awk '/MemTotal/{printf \"%d\\n\", $2 * 0.9;}' < /proc/meminfo)k --vm-keep -m 1 -t 100")
 
     def disrupt_toggle_cdc_feature_properties_on_table(self):
         """Manipulate cdc feature settings
@@ -4832,8 +4873,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                     f"compression=LZ4Compressor compaction(strategy=SizeTieredCompactionStrategy)' " \
                     f"-mode cql3 native compression=lz4 -rate threads=5 -pop seq=1..100000 -log interval=5"
         write_thread = self.tester.run_stress_thread(stress_cmd=write_cmd, round_robin=True, stop_test_on_failure=False)
-        self.tester.verify_stress_thread(cs_thread_pool=write_thread)
-        self.stop_nemesis_on_stress_errors(write_thread)
+        self.tester.verify_stress_thread(write_thread, error_handler=self._nemesis_stress_failure_handler)
         self._verify_multi_dc_keyspace_data(consistency_level="ALL")
         # flush data to ensure it is seen in monitoring
         for node in self.cluster.nodes:
@@ -4844,8 +4884,7 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                    f"compression=LZ4Compressor' -mode cql3 native compression=lz4 -rate threads=5 " \
                    f"-pop seq=1..100000 -log interval=5"
         read_thread = self.tester.run_stress_thread(stress_cmd=read_cmd, round_robin=True, stop_test_on_failure=False)
-        self.tester.verify_stress_thread(cs_thread_pool=read_thread)
-        self.stop_nemesis_on_stress_errors(read_thread)
+        self.tester.verify_stress_thread(read_thread, error_handler=self._nemesis_stress_failure_handler)
 
     def _switch_to_network_replication_strategy(self, keyspaces: List[str]) -> None:
         """Switches replication strategy to NetworkTopology for given keyspaces.
@@ -5149,7 +5188,9 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
             if not column:
                 raise UnsupportedNemesis("No column found to create index on")
             try:
-                index_name = create_index(session, ks, cf, column)
+                with DbNodeLogger(self.cluster.nodes, "create index",
+                                  target_node=self.target_node, additional_info=f"on {ks}.{cf}.{column}"):
+                    index_name = create_index(session, ks, cf, column)
             except InvalidRequest as exc:
                 LOGGER.warning(exc)
                 raise UnsupportedNemesis(  # pylint: disable=raise-missing-from
@@ -5161,7 +5202,9 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                 sleep_for_percent_of_duration(self.tester.test_duration * 60, percent=1,
                                               min_duration=300, max_duration=2400)
             finally:
-                drop_index(session, ks, index_name)
+                with DbNodeLogger(self.cluster.nodes, "drop_index",
+                                  target_node=self.target_node, additional_info=f"index: {index_name}"):
+                    drop_index(session, ks, index_name)
 
     @target_data_nodes
     def disrupt_add_remove_mv(self):
@@ -5268,16 +5311,14 @@ class Nemesis:  # pylint: disable=too-many-instance-attributes,too-many-public-m
                         f" -pop seq=1..1000 -col 'n=FIXED(1) size=FIXED(128)' -log interval=5"
             write_thread = self.tester.run_stress_thread(
                 stress_cmd=write_cmd, round_robin=True, stop_test_on_failure=False)
-            self.tester.verify_stress_thread(cs_thread_pool=write_thread)
-            self.stop_nemesis_on_stress_errors(write_thread)
+            self.tester.verify_stress_thread(write_thread, error_handler=self._nemesis_stress_failure_handler)
             read_cmd = f"cassandra-stress read no-warmup cl=ONE n=1000 " \
                        f" -schema 'replication(strategy=NetworkTopologyStrategy,replication_factor=3)" \
                        f" keyspace={audit_keyspace}' -mode cql3 native -rate 'threads=1 throttle=1000/s'" \
                        f" -pop seq=1..1000 -col 'n=FIXED(1) size=FIXED(128)' -log interval=5"
             read_thread = self.tester.run_stress_thread(
                 stress_cmd=read_cmd, round_robin=True, stop_test_on_failure=False)
-            self.tester.verify_stress_thread(cs_thread_pool=read_thread)
-            self.stop_nemesis_on_stress_errors(read_thread)
+            self.tester.verify_stress_thread(read_thread, error_handler=self._nemesis_stress_failure_handler)
             InfoEvent(message='Verifying Audit table contents').publish()
             rows = audit.get_audit_log(from_datetime=audit_start, category="DML", limit_rows=1500)
             # filter out USE keyspace rows due to https://github.com/scylladb/scylla-enterprise/issues/3169

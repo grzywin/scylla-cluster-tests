@@ -555,8 +555,10 @@ class LocalKindCluster(LocalMinimalClusterBase):
                 script_start_part += f"""
           - role: worker
             labels:
-              {POOL_LABEL_NAME}: {node_pool_type}
-                """
+              {POOL_LABEL_NAME}: {node_pool_type}"""
+                if node_pool_type == self.SCYLLA_POOL_NAME:
+                    script_start_part += f"""
+              scylla.scylladb.com/node-type: scylla"""
         script_end_part = f"""
         EndOfSpec
         /var/tmp/kind delete cluster || true

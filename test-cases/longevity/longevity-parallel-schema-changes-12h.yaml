@@ -13,14 +13,15 @@ stress_cmd: [
 
              ]
 
-n_db_nodes: 5
+n_db_nodes: 6
 n_loaders: 2
 n_monitor_nodes: 1
+simulated_racks: 3
 
 instance_type_db: 'i4i.2xlarge'
 
 nemesis_class_name: 'SisyphusMonkey:1 SisyphusMonkey:1'
-nemesis_selector: [["topology_changes"],["!disruptive","schema_changes"]]
+nemesis_selector: ["topology_changes", "schema_changes and not disruptive"]
 nemesis_interval: 10
 nemesis_during_prepare: false
 

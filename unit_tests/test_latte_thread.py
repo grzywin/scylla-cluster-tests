@@ -19,6 +19,7 @@ from sdcm import sct_abs_path
 from sdcm.stress.latte_thread import (
     LatteStressThread,
     find_latte_fn_names,
+    find_latte_tags,
     get_latte_operation_type,
 )
 from sdcm.utils.decorators import timeout
@@ -98,7 +99,7 @@ def test_03_latte_run(request, docker_scylla, prom_address, params):
 
     check_metrics()
 
-    output = latte_thread.get_results()
+    output, _ = latte_thread.parse_results()
     assert "latency mean" in output[0]
     assert float(output[0]["latency mean"]) > 0
 
@@ -130,7 +131,7 @@ def test_04_latte_run_client_encrypt(request, docker_scylla, params):
 
     latte_thread.run()
 
-    output = latte_thread.get_results()
+    output, _ = latte_thread.parse_results()
     assert "latency mean" in output[0]
     assert float(output[0]["latency mean"]) > 0
 
@@ -194,6 +195,7 @@ def test_find_latte_fn_names(cmd, items):
         ("latte run /foo/bar.rn %sdelete -q -r 500", "write"),
         ("latte run /foo/bar.rn %sinsert_delete -q -r 500", "write"),
         ("latte run /foo/bar.rn %sinsert_delete_by_one -q -r 500", "write"),
+        ("latte run /foo/bar.rn %scounter_write -q -r 500", "counter_write"),
 
         ("latte run /foo/bar.rn %sread -q -r 500", "read"),
         ("latte run /foo/bar.rn %sread_all -q -r 500", "read"),
@@ -209,10 +211,15 @@ def test_find_latte_fn_names(cmd, items):
         ("latte run /foo/bar.rn %smulti_get -q -r 500", "read"),
         ("latte run /foo/bar.rn %sdo_get_all -q -r 500", "read"),
         ("latte run /foo/bar.rn %sget_all,get_single -q -r 500", "read"),
+        ("latte run /foo/bar.rn %scounter_read -q -r 500", "counter_read"),
 
         ("latte run /foo/bar.rn %sread,write -q -r 500", "mixed"),
         ("latte run /foo/bar.rn %swrite:1,read:2 -q -r 500", "mixed"),
         ("latte run /foo/bar.rn %sbatch_insert:1,read_all:2,get_bar:0.5 -q -r 500", "mixed"),
+        ("latte run /foo/bar.rn %sread,counter_write -q -r 500", "mixed"),
+        ("latte run /foo/bar.rn %sread,counter_read -q -r 500", "mixed"),
+        ("latte run /foo/bar.rn %swrite,counter_read -q -r 500", "mixed"),
+        ("latte run /foo/bar.rn %swrite,counter_write -q -r 500", "mixed"),
 
         ("latte run /foo/bar.rn %scustom -q -r 500", "user"),
         ("latte run /foo/bar.rn %suser_profile -q -r 500", "user"),
@@ -225,3 +232,22 @@ def test_get_latte_operation_type(cmd, expected_operation_type):
     for fn_param in fn_params:
         result = get_latte_operation_type(cmd % fn_param)
         assert expected_operation_type == result
+
+
+@pytest.mark.parametrize(
+    "cmd,items", (
+        ("%s --tag=latte-prepare-01 -q -r 500", ["latte-prepare-01"]),
+        ("%s --tag latte-main-01 -q -r 500", ["latte-main-01"]),
+        ("%s --tag  latte-prepare-01,write  -q -r 500", ["latte-prepare-01", "write"]),
+        ("%s --tag=latte-main-01,read    -q -r 500", ["latte-main-01", "read"]),
+        ("%s  --tag=latte-main-01  --tag   write,table1    -q -r 500", ["latte-main-01", "write", "table1"]),
+        ("%s --tag=latte-main-01,read  --tag table2  -q -r 500", ["latte-main-01", "read", "table2"]),
+        ("%s --tag=latte-main-01,read -q -r 500 --tag table2", ["latte-main-01", "read", "table2"]),
+    )
+)
+def test_find_latte_tags(cmd, items):
+    result = find_latte_tags(cmd % 'latte run /foo/bar.rn')
+    assert len(result) > 0
+    assert len(result) == len(items), f"Expected: {items}, Actual: {result}"
+    for item in items:
+        assert item in result

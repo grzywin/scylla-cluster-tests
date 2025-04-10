@@ -34,6 +34,7 @@ from sdcm.utils.docker_remote import RemoteDocker
 from sdcm.utils.remote_logger import HDRHistogramFileLogger
 
 LATTE_FN_NAME_RE = '(?:-f|--function)[ =]([\w\s\d:,]+)|--functions[ =]([\w\s\d:,]+)'
+LATTE_TAG_RE = r'--tag(?:\s+|=)([\w-]+(?:,[\w-]+)*)\b'
 LOGGER = logging.getLogger(__name__)
 
 
@@ -52,21 +53,41 @@ def find_latte_fn_names(stress_cmd):
     return fn_names
 
 
+def find_latte_tags(stress_cmd):
+    tags = []
+    matches = re.findall(LATTE_TAG_RE, stress_cmd)
+    for item in matches:
+        if not item.strip():
+            continue
+        sub_items = item.split(",")
+        for sub_item in sub_items:
+            tags.append(sub_item.strip())
+    return tags
+
+
 def get_latte_operation_type(stress_cmd):
-    write_found, read_found = False, False
+    write_found, counter_write, read_found, counter_read = False, False, False, False
     for fn in find_latte_fn_names(stress_cmd):
-        if re.findall(r"(?:^|_)(write|insert|update|delete)(?:_|$)", fn):
+        if fn == "counter_write":
+            counter_write = True
+        elif fn == "counter_read":
+            counter_read = True
+        elif re.findall(r"(?:^|_)(write|insert|update|delete)(?:_|$)", fn):
             write_found = True
         elif re.findall(r"(?:^|_)(read|select|get|count)(?:_|$)", fn):
             read_found = True
         else:
             return "user"
-    if write_found and read_found:
-        return "mixed"
-    elif write_found:
+    if write_found and not (counter_write or counter_read or read_found):
         return "write"
-    else:
+    elif read_found and not (counter_write or counter_read or write_found):
         return "read"
+    elif counter_write and not (write_found or read_found or counter_read):
+        return "counter_write"
+    elif counter_read and not (write_found or read_found or counter_write):
+        return "counter_read"
+    else:
+        return "mixed"
 
 
 class LatteStressThread(DockerBasedStressThread):  # pylint: disable=too-many-instance-attributes
@@ -175,13 +196,15 @@ class LatteStressThread(DockerBasedStressThread):  # pylint: disable=too-many-in
 
         if not os.path.exists(loader.logdir):
             os.makedirs(loader.logdir, exist_ok=True)
+
+        stress_operation = get_latte_operation_type(self.stress_cmd)
+        first_tag_or_op = "-" + (find_latte_tags(self.stress_cmd) or [stress_operation])[0]
         log_file_name = os.path.join(
-            loader.logdir, 'latte-l%s-c%s-%s.log' % (loader_idx, cpu_idx, uuid.uuid4()))
+            loader.logdir, 'latte%s-l%s-c%s-%s.log' % (first_tag_or_op, loader_idx, cpu_idx, uuid.uuid4()))
         LOGGER.debug('latte benchmarking tool local log: %s', log_file_name)
 
         # TODO: fix usage of the "$HOME". Code works when home is "/". It will fail for non-root.
         log_id = self._build_log_file_id(loader_idx, cpu_idx, "")
-        stress_operation = get_latte_operation_type(self.stress_cmd)
         remote_hdr_file_name = f"hdrh-latte-{stress_operation}-{log_id}.hdr"
         LOGGER.debug("latte remote HDR histogram log file: %s", remote_hdr_file_name)
         local_hdr_file_name = os.path.join(loader.logdir, remote_hdr_file_name)
@@ -260,9 +283,6 @@ class LatteStressThread(DockerBasedStressThread):  # pylint: disable=too-many-in
         else:
             stress_event.severity = Severity.ERROR
         stress_event.add_error(errors=[error_msg])
-
-    def get_results(self) -> list:
-        return [result for _, result, _ in super().get_results()]
 
 
 def format_stress_cmd_error(exc: Exception) -> str:

@@ -1611,10 +1611,16 @@ class SCTConfiguration(dict):
              help="Flag for running db node benchmarks before the tests"),
         dict(name="nemesis_selector", env="SCT_NEMESIS_SELECTOR",
              type=str_or_list, k8s_multitenancy_supported=True,
-             help="""nemesis_selector gets a list of "nemesis properties" and filters IN all the nemesis that has
-             ALL the properties in that list which are set to true (the intersection of all properties).
-             (In other words filters out all nemesis that doesn't ONE of these properties set to true)
-             IMPORTANT: If a property doesn't exist, ALL the nemesis will be included."""),
+             help="""nemesis_selector gets a list of logical expression based on "nemesis properties" and filters IN all the nemesis that has
+             example of logical expression:
+             ```yaml
+                nemesis_selector: "disruptive and not sla" # simple one
+                nemesis_selector: "disruptive and not (sla or limited or manager_operation or config_changes)" # complex one
+             ```
+             """),
+        dict(name="exclude_disruptions", env="SCT_EXCLUDE_DISRUPTIONS",
+             type=list,
+             help="Select which nemesis disruptions should be turned off"),
         dict(name="nemesis_exclude_disabled", env="SCT_NEMESIS_EXCLUDE_DISABLED",
              type=boolean, k8s_multitenancy_supported=True,
              help="""nemesis_exclude_disabled determines whether 'disabled' nemeses are filtered out from list
@@ -1697,7 +1703,8 @@ class SCTConfiguration(dict):
         dict(name="simulated_racks", env="SCT_SIMULATED_RACKS", type=int,
              help="""Forces GossipingPropertyFileSnitch (regardless `endpoint_snitch`) to simulate racks.
              Provide number of racks to simulate."""),
-
+        dict(name="rack_aware_loader", env="SCT_RACK_AWARE_LOADER", type=boolean,
+             help="When enabled, loaders will look for nodes on the same rack."),
         dict(name="use_dns_names", env="SCT_USE_DNS_NAMES", type=boolean,
              help="""Use dns names instead of ip addresses for nodes in cluster"""),
 

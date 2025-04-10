@@ -16,6 +16,7 @@ import re
 import typing
 from functools import cached_property
 import json
+from unittest import SkipTest
 
 import yaml
 import requests
@@ -331,6 +332,9 @@ class ArtifactsTest(ClusterTester):  # pylint: disable=too-many-public-methods
         if backend in ["gce", "aws", "azure"] and self.params.get("use_preinstalled_scylla"):
             with self.subTest("check Scylla IO Params"):
                 try:
+                    if self.node.db_node_instance_type in ["t3.micro"]:
+                        self.skipTest(
+                            f"{self.node.db_node_instance_type} is not a supported instance - skipping this test.")
                     validator = IOTuneValidator(self.node)
                     validator.validate()
                     send_iotune_results_to_argus(
@@ -339,6 +343,8 @@ class ArtifactsTest(ClusterTester):  # pylint: disable=too-many-public-methods
                         self.node,
                         self.params
                     )
+                except SkipTest as exc:
+                    self.log.info("Skipping IOTuneValidation due to %s", exc.args)
                 except Exception:  # pylint: disable=broad-except # noqa: BLE001
                     self.log.error("IOTuneValidator failed", exc_info=True)
                     TestFrameworkEvent(source={self.__class__.__name__},
@@ -484,12 +490,16 @@ class ArtifactsTest(ClusterTester):  # pylint: disable=too-many-public-methods
             return
 
         if self.db_cluster.nodes[0].is_nonroot_install and \
-                SkipPerIssues("https://github.com/scylladb/field-engineering/issues/2254", self.params):
+                SkipPerIssues("https://github.com/scylladb/scylla-cluster-tests/issues/10540", self.params):
             self.log.info("Scylla Doctor test is skipped for non-root test due to issue field-engineering#2254. ")
             return
 
+        if self.node.parent_cluster.cluster_backend == "docker":
+            self.log.info("Scylla Doctor check in SCT isn't yet support for docker backend")
+            return
+
         for node in self.db_cluster.nodes:
-            scylla_doctor = ScyllaDoctor(node, self.test_config)
+            scylla_doctor = ScyllaDoctor(node, self.test_config, bool(self.params.get('unified_package')))
             scylla_doctor.install_scylla_doctor()
             scylla_doctor.argus_collect_sd_package()
             scylla_doctor.run_scylla_doctor_and_collect_results()

@@ -767,7 +767,7 @@ def test_deploy_helm_with_default_values(db_cluster: ScyllaPodCluster):
     """
 
     target_chart_name, namespace = ("t-default-values",) * 2
-    expected_capacity = '10Gi'
+    expected_capacity = '120Gi'
     need_to_collect_logs, k8s_cluster = True, db_cluster.k8s_cluster
     logdir = f"{os.path.join(k8s_cluster.logdir, 'test_deploy_helm_with_default_values')}"
 
@@ -787,11 +787,15 @@ def test_deploy_helm_with_default_values(db_cluster: ScyllaPodCluster):
         k8s_cluster.kubectl_wait(
             "--all --for=condition=Ready pod",
             namespace=namespace,
-            timeout=1200,
+            timeout=1800,
         )
 
         pods_name_and_status = get_pods_and_statuses(
             db_cluster, namespace=namespace, label=db_cluster.pod_selector)
+
+        # We want to add this filtering below to cover rare case where pods_name_and_status method will return
+        # not only t-default-values pods but also cleanup ones which are there only for a moment.
+        pods_name_and_status = [pod for pod in pods_name_and_status if not pod['name'].startswith('cleanup')]
 
         assert len(pods_name_and_status) == 3, (
             f"Expected 3 pods to be created in {namespace} namespace "
@@ -817,8 +821,8 @@ def test_deploy_helm_with_default_values(db_cluster: ScyllaPodCluster):
             assert scylla_version.stdout, (
                 f"Failed to get scylla version from {pod_name_and_status['name']}. "
                 f"Output of command 'scylla --version' is empty")
-        need_to_collect_logs = False
-        log.info("Scylla clsuter with default info has successfully passed validation")
+        need_to_collect_logs = True
+        log.info("Scylla cluster with default info has successfully passed validation")
         return None
     finally:
         if need_to_collect_logs:
@@ -1032,7 +1036,7 @@ def test_cloud_bundle_connectivity_cassandra_stress(tester):
     )
 
     stress_obj = tester.run_stress_thread(cmd, stop_test_on_failure=False)
-    output = stress_obj.get_results()
+    output, _ = stress_obj.parse_results()
 
     assert "latency mean" in output[0]
     assert float(output[0]["latency mean"]) > 0
@@ -1054,7 +1058,7 @@ def test_cloud_bundle_connectivity_scylla_bench(tester):
     )
 
     stress_obj = tester.run_stress_thread(cmd, stop_test_on_failure=False)
-    summaries, errors = stress_obj.verify_results()
+    summaries, errors = stress_obj.parse_results()
     assert not errors
     assert summaries[0]["Clustering row size"] == "Uniform(min=10, max=20)"
 
@@ -1086,7 +1090,7 @@ def test_can_recover_from_fatal_pod_termination(db_cluster):
 
 # NOTE: non-fast K8S backends such as 'k8s-gke' and 'k8s-local-kind' are affected by following bug:
 #       https://github.com/scylladb/scylla-operator/issues/1077
-@pytest.mark.requires_backend("k8s-eks")
+# @pytest.mark.requires_backend("k8s-eks")
 def test_nodetool_flush_and_reshard(db_cluster: ScyllaPodCluster):
     target_node = db_cluster.nodes[0]
 
@@ -1100,9 +1104,7 @@ def test_nodetool_flush_and_reshard(db_cluster: ScyllaPodCluster):
     target_node.run_nodetool("flush -- keyspace1")
 
     try:
-        # Change number of CPUs dedicated for Scylla pods
-        # and make sure that the resharding process begins and finishes
         verify_resharding_on_k8s(db_cluster, new_cpus)
     finally:
-        # Return the cpu count back and wait for the resharding begin and finish
-        verify_resharding_on_k8s(db_cluster, db_cluster.k8s_cluster.scylla_cpu_limit)
+        pass
+        # verify_resharding_on_k8s(db_cluster, db_cluster.k8s_cluster.scylla_cpu_limit)

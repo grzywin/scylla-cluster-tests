@@ -142,26 +142,6 @@ class ScyllaBenchThread(DockerBasedStressThread):  # pylint: disable=too-many-in
         #       and not really needed having 'coordinated omission fixed' latency one.
         self.hdr_tags = ["co-fixed"]
 
-    def verify_results(self):
-        sb_summary = []
-        errors = []
-
-        results = self.get_results()
-
-        for _, result, _ in results:
-            if not result:
-                # Silently skip if stress command threw an error, since it was already reported in _run_stress
-                continue
-            output = result.stdout + result.stderr
-
-            lines = output.splitlines()
-            node_cs_res = self._parse_bench_summary(lines)  # pylint: disable=protected-access
-
-            if node_cs_res:
-                sb_summary.append(node_cs_res)
-
-        return sb_summary, errors
-
     def create_stress_cmd(self, stress_cmd, loader, cmd_runner):
         if self.connection_bundle_file:
             stress_cmd = f'{stress_cmd.strip()} -cloud-config-path={self.target_connection_bundle_file}'
@@ -198,10 +178,7 @@ class ScyllaBenchThread(DockerBasedStressThread):  # pylint: disable=too-many-in
             if self.stress_num > 1:
                 cpu_options = f'--cpuset-cpus="{cpu_idx}"'
             cmd_runner = cleanup_context = RemoteDocker(
-                loader, self.params.get('stress_image.scylla-bench'),
-                extra_docker_opts=f'{cpu_options} --label shell_marker={self.shell_marker} '
-                                  '--network=host '
-                                  '--security-opt seccomp=unconfined '
+                loader, self.params.get("stress_image.scylla-bench"), extra_docker_opts=f'{cpu_options} --label shell_marker={self.shell_marker} --network=host --entrypoint="" --security-opt seccomp=unconfined '
             )
             cmd_runner_name = loader.ip_address
 
@@ -255,8 +232,7 @@ class ScyllaBenchThread(DockerBasedStressThread):  # pylint: disable=too-many-in
 
         return loader, result, scylla_bench_event
 
-    @classmethod
-    def _parse_bench_summary(cls, lines):
+    def _parse_stress_summary(self, lines: list) -> dict:
         """
         Parsing bench results, only parse the summary results.
         Collect results of all nodes and return a dictionaries' list,
@@ -287,7 +263,7 @@ class ScyllaBenchThread(DockerBasedStressThread):  # pylint: disable=too-many-in
                 continue
             key = split[0].strip()
             value = ' '.join(split[1].split())
-            if value_opts := cls._SB_STATS_MAPPING.get(key):
+            if value_opts := self._SB_STATS_MAPPING.get(key):
                 value_type, target_key = value_opts
                 match value_type:
                     case builtins.int:

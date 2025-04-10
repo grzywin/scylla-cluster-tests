@@ -31,7 +31,6 @@ import time
 import traceback
 import itertools
 import json
-import ipaddress
 import shlex
 from decimal import Decimal, ROUND_UP
 from importlib import import_module
@@ -105,6 +104,7 @@ from sdcm.utils.common import (
     raise_exception_in_thread,
     get_sct_root_path,
 )
+from sdcm.utils.context_managers import DbNodeLogger
 from sdcm.utils.ci_tools import get_test_name
 from sdcm.utils.database_query_utils import is_system_keyspace
 from sdcm.utils.distro import Distro
@@ -126,7 +126,7 @@ from sdcm.utils.version_utils import (
     ComparableScyllaVersion,
     SCYLLA_VERSION_RE, is_enterprise,
 )
-from sdcm.utils.net import get_my_ip
+from sdcm.utils.net import get_my_ip, to_inet_ntop_format
 from sdcm.utils.node import build_node_api_command
 from sdcm.wait import wait_for_log_lines
 from sdcm.sct_events import Severity
@@ -172,8 +172,8 @@ from sdcm.utils.replication_strategy_utils import ReplicationStrategy, DataCente
 # are supposed to run longer than 24 hours from being killed
 SCYLLA_DIR = "/var/lib/scylla"
 
-DB_LOG_PATTERN_RESHARDING_START = "(?i)database - Resharding"
-DB_LOG_PATTERN_RESHARDING_FINISH = "(?i)storage_service - Restarting a node in NORMAL"
+DB_LOG_PATTERN_RESHARDING_START = "database - Resharding"
+DB_LOG_PATTERN_RESHARDING_FINISH = "storage_service - Restarting a node in NORMAL"
 
 SPOT_TERMINATION_CHECK_DELAY = 5
 
@@ -486,7 +486,8 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
 
     @property
     def host_id(self) -> str | None:
-        return self.parent_cluster.get_nodetool_info(self, ignore_status=True, publish_event=False).get("ID")
+        info = self.parent_cluster.get_nodetool_info(self, ignore_status=True, publish_event=False) or {}
+        return info.get("ID")
 
     @property
     def db_node_instance_type(self) -> Optional[str]:
@@ -813,7 +814,8 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
             shutdown_interface_command = "/sbin/ifdown {}"
         else:
             shutdown_interface_command = "ip link set {} down"
-        self.remoter.sudo(shutdown_interface_command.format(interface_name))
+        with DbNodeLogger([self], "stop network interface", target_node=self, additional_info=interface_name):
+            self.remoter.sudo(shutdown_interface_command.format(interface_name))
 
     def start_network_interface(self, interface_name="eth1"):
         if self.distro.is_rhel_like:
@@ -823,7 +825,8 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
             startup_interface_command = "networkctl reconfigure {}"
         else:
             startup_interface_command = "ip link set {} up"
-        self.remoter.sudo(startup_interface_command.format(interface_name))
+        with DbNodeLogger([self], "start network interface", target_node=self, additional_info=interface_name):
+            self.remoter.sudo(startup_interface_command.format(interface_name))
 
     @property
     def is_enterprise(self) -> bool:
@@ -872,7 +875,7 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
     def _get_public_ip_address(self) -> Optional[str]:
         public_ips, _ = self._refresh_instance_state()
         if public_ips:
-            return public_ips[0]
+            return to_inet_ntop_format(public_ips[0])
         else:
             return None
 
@@ -880,13 +883,13 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
     def private_ip_address(self) -> Optional[str]:
         # Primary network interface private IP
         if self._private_ip_address_cached is None:
-            self._private_ip_address_cached = self._get_private_ip_address()
+            self._private_ip_address_cached = to_inet_ntop_format(self._get_private_ip_address())
         return self._private_ip_address_cached
 
     def _get_private_ip_address(self) -> Optional[str]:
         _, private_ips = self._refresh_instance_state()
         if private_ips:
-            return private_ips[0]
+            return to_inet_ntop_format(private_ips[0])
         else:
             return None
 
@@ -894,7 +897,7 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
     def ipv6_ip_address(self) -> Optional[str]:
         # Primary network interface public IPv6
         if self._ipv6_ip_address_cached is None:
-            self._ipv6_ip_address_cached = self._get_ipv6_ip_address()
+            self._ipv6_ip_address_cached = to_inet_ntop_format(self._get_ipv6_ip_address())
         return self._ipv6_ip_address_cached
 
     def _get_ipv6_ip_address(self) -> Optional[str]:
@@ -902,7 +905,9 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
 
     def get_all_ip_addresses(self):
         public_ipv4_addresses, private_ipv4_addresses = self._refresh_instance_state()
-        return list(set(public_ipv4_addresses + private_ipv4_addresses + [self._get_ipv6_ip_address()]))
+        public_ipv4_addresses = [to_inet_ntop_format(address) for address in public_ipv4_addresses]
+        private_ipv4_addresses = [to_inet_ntop_format(address) for address in private_ipv4_addresses]
+        return list(set(public_ipv4_addresses + private_ipv4_addresses + [to_inet_ntop_format(self._get_ipv6_ip_address())]))
 
     def _wait_public_ip(self):
         public_ips, _ = self._refresh_instance_state()
@@ -1144,12 +1149,14 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
 
         if hard:
             self.log.debug('Hardly rebooting node')
-            self.hard_reboot()
+            with DbNodeLogger([self], "hard reboot node", target_node=self):
+                self.hard_reboot()
         else:
             self.log.debug('Softly rebooting node')
             if not self.remoter.is_up(60):
                 raise RuntimeError('Target host is down')
-            self.soft_reboot()
+            with DbNodeLogger([self], "soft reboot node", target_node=self):
+                self.soft_reboot()
 
         # wait until the reboot is executed
         wait.wait_for(func=uptime_changed, step=10, timeout=60*45, throw_exc=True)
@@ -2450,13 +2457,16 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
                                 timeout=timeout, ignore_status=True).return_code == 0
 
     def start_service(self, service_name: str, timeout: int = 500, ignore_status=False):
-        self._service_cmd(service_name=service_name, cmd='start', timeout=timeout, ignore_status=ignore_status)
+        with DbNodeLogger([self], f"start {service_name}", target_node=self):
+            self._service_cmd(service_name=service_name, cmd='start', timeout=timeout, ignore_status=ignore_status)
 
     def stop_service(self, service_name: str, timeout=500, ignore_status=False):
-        self._service_cmd(service_name=service_name, cmd='stop', timeout=timeout, ignore_status=ignore_status)
+        with DbNodeLogger([self], f"stop {service_name}", target_node=self):
+            self._service_cmd(service_name=service_name, cmd='stop', timeout=timeout, ignore_status=ignore_status)
 
     def restart_service(self, service_name: str, timeout=500, ignore_status=False):
-        self._service_cmd(service_name=service_name, cmd='restart', timeout=timeout, ignore_status=ignore_status)
+        with DbNodeLogger([self], f"restart {service_name}", target_node=self):
+            self._service_cmd(service_name=service_name, cmd='restart', timeout=timeout, ignore_status=ignore_status)
 
     @property
     def verify_up_timeout(self):
@@ -2670,8 +2680,8 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
                     runner = partial(run_long_running_cmd, self.remoter)
                 else:
                     runner = self.remoter.run
-                result = \
-                    runner(cmd, timeout=timeout, ignore_status=ignore_status, verbose=verbose, retry=retry)
+                with DbNodeLogger([self], f"nodetool {cmd}", target_node=self):
+                    result = runner(cmd, timeout=timeout, ignore_status=ignore_status, verbose=verbose, retry=retry)
 
                 self.log.debug("Command '%s' duration -> %s s" % (result.command, result.duration))
 
@@ -2787,8 +2797,7 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
         for row in cql_results:
             peer = row.peer
             try:
-                # make sure we use ipv6 long format (some tools remove leading zeros)
-                peer = ipaddress.ip_address(row.peer).exploded
+                peer = to_inet_ntop_format(row.peer)
             except ValueError as exc:
                 current_err = f"Peer '{peer}' is not an IP address, err: {exc}\n"
                 LOGGER.warning(current_err)
@@ -2820,8 +2829,7 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
             if line.startswith('SCHEMA:'):
                 schema = line.replace('SCHEMA:', '')
             elif line.startswith('RPC_ADDRESS:'):
-                # make sure we use ipv6 long format (some tools remove leading zeros)
-                ip = ipaddress.ip_address(line.replace('RPC_ADDRESS:', '')).exploded
+                ip = to_inet_ntop_format(line.replace('RPC_ADDRESS:', ''))
             elif line.startswith('STATUS:'):
                 status = line.replace('STATUS:', '').split(',')[0]
             elif line.startswith('DC:'):
@@ -3163,8 +3171,13 @@ class BaseNode(AutoSshContainerMixin):  # pylint: disable=too-many-instance-attr
         self.remoter.sudo('systemctl stop firewalld', ignore_status=True)
         self.remoter.sudo('systemctl disable firewalld', ignore_status=True)
 
-    def log_message(self, message: str, level: str = 'info', verbose: bool = False) -> None:
-        self.remoter.run(f'logger -p {level} -t scylla {shlex.quote(message)}', verbose=verbose)
+    def log_message(self, message: str, level: str = 'info') -> None:
+        try:
+            self.remoter.run(
+                f'logger -p {level} -t scylla-cluster-tests {shlex.quote(message)}',
+                ignore_status=True, verbose=False, retry=0, timeout=10)
+        except Exception:  # pylint: disable=broad-except  # noqa: BLE001
+            pass
 
     def query_metadata(self, url: str, headers: dict = None, token_url: str = None, token_header: str = None,
                        token_ttl_header: str = None, token_ttl: int = 21600) -> str:
@@ -3512,7 +3525,8 @@ class BaseCluster:  # pylint: disable=too-many-instance-attributes,too-many-publ
             self.test_config.argus_client().submit_sct_logs([LogLink(log_name=node.name, log_link=log_links[0])])
         except Exception as exc:  # pylint: disable=broad-except  # noqa: BLE001
             self.log.error("Failed to collect logs for node %s: %s", node.name, exc)
-        node.destroy()
+        with DbNodeLogger(self.nodes, "terminate node", target_node=node):
+            node.destroy()
 
     def get_db_auth(self):
         if self.params.get('use_ldap') and self.params.get('are_ldap_users_on_scylla'):
@@ -4389,8 +4403,7 @@ class BaseScyllaCluster:  # pylint: disable=too-many-public-methods, too-many-in
                 if not match:
                     continue
                 node_info = match.groupdict()
-                # make sure we use ipv6 long format (some tools remove leading zeros)
-                node_ip = ipaddress.ip_address(node_info.pop("ip")).exploded
+                node_ip = to_inet_ntop_format(node_info.pop("ip"))
                 # NOTE: following replacement is needed for the K8S case where
                 #       registered IP is different than the one used for network connections
                 if verification_node.is_kubernetes():
@@ -4979,7 +4992,6 @@ class BaseScyllaCluster:  # pylint: disable=too-many-public-methods, too-many-in
             node.stop_scylla(verify_down=True)
             node.start_scylla(verify_up=True)
             self.log.debug("'%s' restarted.", node.name)
-            self.wait_all_nodes_un()  # wait for all nodes to be up due to issue https://github.com/scylladb/scylladb/issues/18647
 
     @retrying(n=15, sleep_time=5, allowed_exceptions=ClusterNodesNotReady)
     def wait_all_nodes_un(self):
@@ -5197,9 +5209,9 @@ class BaseScyllaCluster:  # pylint: disable=too-many-public-methods, too-many-in
                 enabled_features_state.append(feature in enabled_features)
         return all(enabled_features_state)
 
-    def log_message(self, message: str, level: str = 'info', verbose: bool = False) -> None:
+    def log_message(self, message: str, level: str = 'info') -> None:
         for node in self.nodes:
-            node.log_message(message, level, verbose)
+            node.log_message(message, level)
 
 
 class BaseLoaderSet():
@@ -5366,86 +5378,14 @@ class BaseLoaderSet():
                 self.log.warning("failed to kill docker stress command on [%s]: [%s]",
                                  str(loader), str(ex))
 
-    @staticmethod
-    def _parse_cs_summary(lines):
-        """
-        Parsing c-stress results, only parse the summary results.
-        Collect results of all nodes and return a dictionaries' list,
-        the new structure data will be easy to parse, compare, display or save.
-        """
-        results = {}
-        enable_parse = False
-
-        for line in lines:
-            line = line.strip()  # noqa: PLW2901
-            if not line:
-                continue
-            # Parse loader & cpu info
-            if line.startswith('TAG:'):
-                # TAG: loader_idx:1-cpu_idx:0-keyspace_idx:1
-                ret = re.findall(r"TAG: loader_idx:(\d+)-cpu_idx:(\d+)-keyspace_idx:(\d+)", line)
-                results['loader_idx'] = ret[0][0]
-                results['cpu_idx'] = ret[0][1]
-                results['keyspace_idx'] = ret[0][2]
-                continue
-            if line.startswith('Username:'):
-                # Mode:
-                # ...
-                #   Username: null
-                #   Password: null
-                results['username'] = line.split('Username:')[1].strip()
-            if line.startswith('Results:'):
-                # Results:
-                # Op rate                   :    9,999 op/s  [WRITE: 9,999 op/s]
-                # Partition rate            :    9,999 pk/s  [WRITE: 9,999 pk/s]
-                # Row rate                  :    9,999 row/s [WRITE: 9,999 row/s]
-                # ....
-                enable_parse = True
-                continue
-            if line == '':
-                continue
-            if line == 'END':
-                break
-            if not enable_parse:
-                continue
-            split_idx = line.find(':')
-            if split_idx < 0:
-                continue
-            # Op rate                   :    9,999 op/s  [WRITE: 9,999 op/s]
-            # Partition rate            :    9,999 pk/s  [WRITE: 9,999 pk/s]
-            # Row rate                  :    9,999 row/s [WRITE: 9,999 row/s]
-            # Latency mean              :    1.1 ms [WRITE: 1.1 ms]
-            # Latency median            :    0.6 ms [WRITE: 0.6 ms]
-            # Latency 95th percentile   :    2.3 ms [WRITE: 2.3 ms]
-            # Latency 99th percentile   :    5.4 ms [WRITE: 5.4 ms]
-            # Latency 99.9th percentile :   23.7 ms [WRITE: 23.7 ms]
-            # Latency max               : 15787.4 ms [WRITE: 15,787.4 ms]
-            # Total partitions          : 108,000,096 [WRITE: 108,000,096]
-            # Total errors              :          0 [WRITE: 0]
-            # Total GC count            : 0
-            # Total GC memory           : 0.000 KiB
-            # Total GC time             :    0.0 seconds
-            key = line[:split_idx].strip().lower()
-            value = line[split_idx + 1:].split()[0].replace(",", "")
-            results[key] = value
-            match = re.findall(r'\[READ:\s([\d,]+\.\d+)\sms,\sWRITE:\s([\d,]+\.\d)\sms\]', line)
-            if match:  # parse results for mixed workload
-                results['%s read' % key] = match[0][0]
-                results['%s write' % key] = match[0][1]
-
-        if not enable_parse:
-            LOGGER.warning('Cannot find summary in c-stress results: %s', lines[-10:])
-            return {}
-        return results
-
     def update_rack_info_in_argus(self):
         for loader in self.nodes:
             LOGGER.debug("Update rack info in Argus for loader '%s'", loader.name)
             loader.update_rack_info_in_argus(loader.datacenter, loader.node_rack)
 
-    def log_message(self, message: str, level: str = 'info', verbose: bool = False) -> None:
+    def log_message(self, message: str, level: str = 'info') -> None:
         for node in self.nodes:
-            node.log_message(message, level, verbose)
+            node.log_message(message, level)
 
 
 class BaseMonitorSet:  # pylint: disable=too-many-public-methods,too-many-instance-attributes
