@@ -1106,5 +1106,4 @@ def test_nodetool_flush_and_reshard(db_cluster: ScyllaPodCluster):
     try:
         verify_resharding_on_k8s(db_cluster, new_cpus)
     finally:
-        pass
-        # verify_resharding_on_k8s(db_cluster, db_cluster.k8s_cluster.scylla_cpu_limit)
+        verify_resharding_on_k8s(db_cluster, db_cluster.k8s_cluster.scylla_cpu_limit)
