@@ -23,6 +23,7 @@ from kubernetes.client import exceptions as k8s_exceptions
 from sdcm.cluster import (
     DB_LOG_PATTERN_RESHARDING_START,
     DB_LOG_PATTERN_RESHARDING_FINISH,
+    UnexpectedExit
 )
 from sdcm.cluster_k8s import (
     SCYLLA_MANAGER_NAMESPACE,
@@ -197,8 +198,16 @@ def verify_resharding_on_k8s(db_cluster: ScyllaPodCluster, cpus: Union[str, int,
         reshard_start_found = False
         reshard_finish_found = False
 
-        for attempt in range(120):
-            logs = db_cluster.k8s_cluster.kubectl(f'logs -n scylla pod/{node.k8s_pod_name} --since={search_period}s').stdout
+        for attempt in range(180):
+            try:
+                logs = db_cluster.k8s_cluster.kubectl(f'logs -n scylla pod/{node.k8s_pod_name} '
+                                                      f'--since={search_period}s').stdout
+            except UnexpectedExit as e:
+                log.info(f"Pod '{node.name}' not ready for logs yet: {e}")
+                time.sleep(search_period - 1)
+                continue
+
+            log.info(f"Pod '{node.name}' finally ready for logs!")
 
             if not reshard_start_found and DB_LOG_PATTERN_RESHARDING_START in logs:
                 log.info("Resharding has been started on the '%s' node.", node.name)
@@ -215,7 +224,10 @@ def verify_resharding_on_k8s(db_cluster: ScyllaPodCluster, cpus: Union[str, int,
 
             time.sleep(search_period - 1)
 
-        log.info("Resharding has been finished successfully on the '%s' node.", node.name)
+        if not reshard_start_found or not reshard_finish_found:
+            log.warning("Resharding did not complete properly on the '%s' node.", node.name)
+        else:
+            log.info("Resharding has been finished successfully on the '%s' node.", node.name)
 
     # # Wait for the start of the resharding.
     # # In K8S it starts from the last node of a rack and then goes to previous ones.
