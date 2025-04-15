@@ -767,7 +767,7 @@ def test_deploy_helm_with_default_values(db_cluster: ScyllaPodCluster):
     """
 
     target_chart_name, namespace = ("t-default-values",) * 2
-    expected_capacity = '10Gi'
+    expected_capacity = '120Gi'
     need_to_collect_logs, k8s_cluster = True, db_cluster.k8s_cluster
     logdir = f"{os.path.join(k8s_cluster.logdir, 'test_deploy_helm_with_default_values')}"
 
