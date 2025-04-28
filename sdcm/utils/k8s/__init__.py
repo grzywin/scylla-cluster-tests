@@ -919,7 +919,7 @@ class ScyllaPodsIPChangeTrackerThread(threading.Thread):
     def stop(self, timeout=None) -> None:
         self.log.warning("Stopping Scylla pods IP change tracker thread")
         self._termination_event.set()
-        if hasattr(self.watcher, 'close') and not self.watcher.closed:
+        if self.watcher and hasattr(self.watcher, 'close') and not self.watcher.closed:
             self.watcher.close()
         self.join(timeout)
 
