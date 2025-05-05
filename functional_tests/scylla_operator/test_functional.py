@@ -793,6 +793,10 @@ def test_deploy_helm_with_default_values(db_cluster: ScyllaPodCluster):
         pods_name_and_status = get_pods_and_statuses(
             db_cluster, namespace=namespace, label=db_cluster.pod_selector)
 
+        # Sometimes the get_pods_and_statuses method incorrectly includes cleanup pods.
+        # The line below filters out these pods from our pod list.
+        pods_name_and_status = [pod for pod in pods_name_and_status if 'cleanup' not in pod['name'].lower()]
+
         assert len(pods_name_and_status) == 3, (
             f"Expected 3 pods to be created in {namespace} namespace "
             f"but actually {len(pods_name_and_status)}: {pods_name_and_status}")
